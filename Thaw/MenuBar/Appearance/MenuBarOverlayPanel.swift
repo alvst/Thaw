@@ -396,13 +396,11 @@ final class MenuBarOverlayPanel: NSPanel, @unchecked Sendable {
             diagLog.debug("No app state. \(actionMessage)")
             return false
         }
-        guard
-            appState.menuBarManager.hasValidMenuBar(
-                in: windows,
-                for: owningScreen.displayID
-            )
-        else {
-            diagLog.debug("No valid menu bar found. \(actionMessage)")
+        if let failure = appState.menuBarManager.menuBarValidationFailure(
+            in: windows,
+            for: owningScreen.displayID
+        ) {
+            diagLog.debug("No valid menu bar found for display=\(owningScreen.displayID) (\(failure.rawValue)). \(actionMessage)")
             return false
         }
         return true

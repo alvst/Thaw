@@ -66,6 +66,9 @@ final class AppState: ObservableObject {
     /// Manager for user notifications.
     let userNotificationManager = UserNotificationManager()
 
+    /// Diagnostic-only per-display inventory and resource snapshot logger.
+    let displayDiagnostics = DisplayDiagnostics()
+
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
@@ -116,6 +119,7 @@ final class AppState: ObservableObject {
         updatesManager.performSetup(with: self)
         userNotificationManager.performSetup(with: self)
         profileManager.performSetup(with: self)
+        displayDiagnostics.performSetup(with: self)
 
         configureCancellables()
         diagLog.debug("setupTask: AppState setup sequence complete")

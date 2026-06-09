@@ -620,16 +620,28 @@ final class MenuBarManager: ObservableObject {
         }
     }
 
-    /// Returns a Boolean value that indicates whether the given display
-    /// has a valid menu bar.
-    func hasValidMenuBar(in windows: [WindowInfo], for display: CGDirectDisplayID) -> Bool {
-        guard
-            let window = WindowInfo.menuBarWindow(from: windows, for: display),
-            let element = AXHelpers.element(at: window.bounds.origin)
-        else {
-            return false
+    /// The reason a display failed menu bar validation, for diagnostics.
+    enum MenuBarValidationFailure: String {
+        /// No WindowServer "Menubar" window was found within the display bounds.
+        case noMenuBarWindow = "no WindowServer Menubar window in display bounds"
+        /// No accessibility element was found at the menu bar window's origin.
+        case noAXElement = "no AX element at menu bar origin"
+        /// The accessibility element at the origin was not a menu bar.
+        case wrongAXRole = "AX element role is not menuBar"
+    }
+
+    /// Returns the reason the given display lacks a valid menu bar, or nil when
+    /// the menu bar is valid. Streamed displays such as the Apple Vision Pro Mac
+    /// Virtual Display or an iPad Sidecar fail at noMenuBarWindow, which lets
+    /// diagnostics distinguish them from a transiently missing AX element.
+    func menuBarValidationFailure(in windows: [WindowInfo], for display: CGDirectDisplayID) -> MenuBarValidationFailure? {
+        guard let window = WindowInfo.menuBarWindow(from: windows, for: display) else {
+            return .noMenuBarWindow
         }
-        return AXHelpers.role(for: element) == .menuBar
+        guard let element = AXHelpers.element(at: window.bounds.origin) else {
+            return .noAXElement
+        }
+        return AXHelpers.role(for: element) == .menuBar ? nil : .wrongAXRole
     }
 
     /// Shows the secondary context menu.
