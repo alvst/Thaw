@@ -40,8 +40,14 @@ final class ControlItem {
                 Lengths.standard
             case .hidden, .alwaysHidden:
                 switch state {
-                case .showSection: Lengths.standard
-                case .hideSection: Lengths.expanded
+                case .showSection:
+                    Lengths.standard
+                case .hideSection:
+                    // macOS 27 no longer reflows over-wide status items, so an
+                    // expanded divider just overflows off the right edge and
+                    // confuses section classification instead of hiding anything.
+                    // Keep it at standard width there (hiding is unsupported).
+                    Constants.supportsSectionHiding ? Lengths.expanded : Lengths.standard
                 }
             }
         }
@@ -92,6 +98,19 @@ final class ControlItem {
                 button.target = controlItem
                 button.action = #selector(controlItem.performAction)
                 button.sendAction(on: [.leftMouseDown, .rightMouseUp])
+
+                // On macOS 27 the WindowServer no longer exposes individual
+                // menu bar item windows, so Thaw enumerates items through the
+                // Accessibility tree instead (see MenuBarItemAXProvider). AX
+                // does not surface the status item's autosaveName, so publish
+                // the control item's stable identifier as the accessibility
+                // identifier. This lets the AX enumerator recognize Thaw's own
+                // control items (and match them to their MenuBarItemTag) the
+                // same way the CGS path matched on the window title. Only needed
+                // on macOS 27; leave macOS 26 untouched.
+                if #available(macOS 27, *) {
+                    button.setAccessibilityIdentifier(controlItem.identifier.rawValue)
+                }
             } else {
                 self.constraint = nil
             }
@@ -426,7 +445,9 @@ final class ControlItem {
             constraint?.isActive = true
             statusItem.length = identifier.length(for: state)
 
-            let shouldUseSpacers = (identifier == .hidden || identifier == .alwaysHidden) && state == .hideSection
+            let shouldUseSpacers = Constants.supportsSectionHiding
+                && (identifier == .hidden || identifier == .alwaysHidden)
+                && state == .hideSection
             updateSpacerItems(forHiddenState: shouldUseSpacers)
         } else {
             updateSpacerItems(forHiddenState: false)
@@ -525,6 +546,18 @@ final class ControlItem {
         }
     }
 
+    /// Removes the control item (and any spacers) from the menu bar ahead of
+    /// app termination.
+    ///
+    /// macOS 27 does not reliably drop a status item when its owning process
+    /// exits — the icon (and its now-dead menu) linger as a ghost. Removing the
+    /// item explicitly while the app is still alive lets MenuBarAgent reclaim it
+    /// cleanly. The preferred position is preserved by `removeFromMenuBar()`.
+    func tearDownForTermination() {
+        removeSpacerItems()
+        removeFromMenuBar()
+    }
+
     /// Updates the status item's visibility without clearing its preferred position.
     private func setIceIconDisplayed(_ shouldShow: Bool) {
         statusItem.isVisible = true
@@ -603,6 +636,14 @@ final class ControlItem {
                     {
                         section.toggle()
                     }
+                    return
+                }
+
+                // macOS 27 has no hidden section to reveal, so a plain click on
+                // the icon opens the menu (Settings, Search, …) like a typical
+                // menu bar app instead of toggling nothing.
+                if !Constants.supportsSectionHiding {
+                    showMenu()
                     return
                 }
 
