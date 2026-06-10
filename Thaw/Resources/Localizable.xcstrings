@@ -2922,6 +2922,9 @@
         }
       }
     },
+    "Active profile" : {
+      "comment" : "Picker option: save spacing changes to the active profile only when relaunch confirmations are disabled."
+    },
     "Adaptive" : {
       "comment" : "Text for the adaptive background option in the menu bar.",
       "localizations" : {
@@ -3516,6 +3519,9 @@
           }
         }
       }
+    },
+    "All profiles" : {
+      "comment" : "Picker option: save spacing changes to every profile when relaunch confirmations are disabled."
     },
     "Allow" : {
       "comment" : "Button title for allowing the app to control Thaw settings.",
@@ -5191,6 +5197,9 @@
           }
         }
       }
+    },
+    "Apply menu bar spacing change?" : {
+      "comment" : "Title of the just-in-time confirmation shown before a display transition relaunches menu bar apps to apply new spacing."
     },
     "Apply spacing change?" : {
       "comment" : "Title of the alert shown before applying a menu bar item spacing change.",
@@ -8181,6 +8190,9 @@
           }
         }
       }
+    },
+    "Before a display change or spacing edit relaunches your menu bar apps, Thaw asks you to confirm. Turn this off to apply spacing changes and relaunch apps without confirmation." : {
+      "comment" : "Annotation for the Confirm before relaunching apps toggle in the Displays pane."
     },
     "BETA" : {
       "comment" : "The text displayed in the badge.",
@@ -11637,6 +11649,9 @@
         }
       }
     },
+    "Confirm before relaunching apps" : {
+      "comment" : "Toggle in the Displays pane controlling whether spacing changes ask for confirmation before relaunching menu bar apps."
+    },
     "Conflicting Menu Bar Manager Detected" : {
       "comment" : "Title of an alert that appears when a conflicting menu bar manager is detected.",
       "localizations" : {
@@ -14269,6 +14284,9 @@
           }
         }
       }
+    },
+    "Don't ask again" : {
+      "comment" : "Suppression checkbox on the spacing relaunch confirmation; disables future confirmations."
     },
     "Don't Check" : {
       "comment" : "A button that disables automatic update checking.",
@@ -17604,6 +17622,9 @@
           }
         }
       }
+    },
+    "Experimental support for macOS 27 beta - some features may be unavailable or unreliable" : {
+
     },
     "Export" : {
       "comment" : "A menu item that exports a profile to a file.",
@@ -26439,6 +26460,9 @@
           }
         }
       }
+    },
+    "Menu bar support on macOS 27 is experimental: hiding is unavailable and some features may be unreliable." : {
+
     },
     "Modified: %@" : {
       "comment" : "A sublabel within the profile list showing when a profile was last modified.",
@@ -46236,6 +46260,20 @@
     "Welcome to Thaw" : {
       "comment" : "Title of the welcome onboarding slide."
     },
+    "When a display transition requires Thaw to apply a different menu bar spacing, Thaw relaunches apps with menu bar items. Relaunching apps may cause unsaved input, progress, or transient app state to be lost." : {
+      "comment" : "A warning that a display transition requiring a different menu bar spacing relaunches menu bar apps, which can lose unsaved state.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "When a display transition requires Thaw to apply a different menu bar spacing, Thaw relaunches apps with menu bar items. Relaunching apps may cause unsaved input, progress, or transient app state to be lost."
+          }
+        }
+      }
+    },
+    "When a profile is active, choose whether spacing changes save to just the active profile or to every profile." : {
+      "comment" : "Annotation for the profile-target picker shown when relaunch confirmations are disabled."
+    },
     "When an app sends a thaw:// URL to change settings, Thaw checks if that app is whitelisted." : {
       "comment" : "A step in the process of how to use Thaw.",
       "localizations" : {
@@ -46598,6 +46636,9 @@
           }
         }
       }
+    },
+    "Without confirmation, save spacing to" : {
+      "comment" : "Label for the picker choosing which profiles receive a spacing change when relaunch confirmations are disabled."
     },
     "Would you like to import your existing configuration?" : {
       "comment" : "A question displayed to the user when they first open the app, asking if they would like to import their existing configuration.",
