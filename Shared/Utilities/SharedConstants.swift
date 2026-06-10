@@ -20,6 +20,18 @@ enum SharedConstants {
     /// Path to the SkyLight private framework for window capture APIs.
     static let skyLightFrameworkPath: String = requiredInfoPlistString(skyLightFrameworkPathInfoPlistKey)
 
+    // MARK: - Menu Bar Hosting Process
+
+    /// Bundle identifier of the process that owns menu bar item windows at the
+    /// CG layer. On macOS 26 this is Control Center; on macOS 27+ it is MenuBarAgent.
+    static var menuBarHostingBundleID: String {
+        if #available(macOS 27, *) {
+            return "com.apple.MenuBarAgent"
+        } else {
+            return "com.apple.controlcenter"
+        }
+    }
+
     // MARK: - Helpers
 
     /// Returns a required string from the bundle's Info.plist.
