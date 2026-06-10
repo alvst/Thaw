@@ -808,6 +808,86 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
     }
 
     /// Captures the images of the given menu bar items and returns the result.
+    /// Captures item thumbnails on macOS 27 where status items are no longer
+    /// independent CGS windows.
+    ///
+    /// On macOS 27, `Bridging.getWindowBounds` returns nil for every item
+    /// (their `windowID`s are synthetic FNV-1a hashes, not real CGS IDs), and
+    /// `SLWindowListCreateImageFromArray` cannot capture MenuBarAgent's content.
+    /// Instead this captures `MenuBarAgent`'s menu bar hosting window — which
+    /// renders every status item on a transparent background — and crops each
+    /// item out of it using the AX-provided bounds in `item.bounds`. Capturing
+    /// the hosting window (rather than a display region) keeps the menu bar fill
+    /// and the wallpaper out of the thumbnails.
+    @available(macOS 27, *)
+    private nonisolated func axBoundsCapture(
+        _ itemsWithBounds: [(item: MenuBarItem, bounds: CGRect)],
+        scale _: CGFloat,
+        displayID: CGDirectDisplayID
+    ) async -> CaptureResult {
+        guard !itemsWithBounds.isEmpty else { return CaptureResult() }
+
+        guard let capture = await ScreenCapture.captureMenuBarHostingWindowAsync(displayID: displayID) else {
+            MenuBarItemImageCache.diagLog.warning(
+                "axBoundsCapture: captureMenuBarHostingWindowAsync failed for \(itemsWithBounds.count) items"
+            )
+            var fail = CaptureResult()
+            fail.excluded = itemsWithBounds.map(\.item)
+            return fail
+        }
+
+        let composite = capture.image
+        let windowFrame = capture.windowFrame
+        let scale = capture.scale
+
+        MenuBarItemImageCache.diagLog.debug(
+            "axBoundsCapture: hosting window \(composite.width)×\(composite.height)px, " +
+            "cropping \(itemsWithBounds.count) items"
+        )
+
+        var result = CaptureResult()
+
+        for (item, bounds) in itemsWithBounds {
+            if shouldSkipCapture(for: item) {
+                result.excluded.append(item)
+                continue
+            }
+
+            // Map the item's global (Y-down) frame into the hosting window's
+            // image: subtract the window origin, then scale to pixels. CGImage
+            // rows run top-down, matching the Y-down screen convention.
+            let cropRect = CGRect(
+                x: (bounds.minX - windowFrame.minX) * scale,
+                y: (bounds.minY - windowFrame.minY) * scale,
+                width: bounds.width * scale,
+                height: bounds.height * scale
+            )
+
+            guard let croppedImage = composite.cropping(to: cropRect) else {
+                MenuBarItemImageCache.diagLog.debug(
+                    "axBoundsCapture: cropping failed for \(item.logString) cropRect=\(cropRect)"
+                )
+                recordCaptureFailure(for: item)
+                result.excluded.append(item)
+                continue
+            }
+
+            guard !croppedImage.isTransparent() else {
+                MenuBarItemImageCache.diagLog.debug(
+                    "axBoundsCapture: transparent crop for \(item.logString)"
+                )
+                recordCaptureFailure(for: item)
+                result.excluded.append(item)
+                continue
+            }
+
+            recordCaptureSuccess(for: item)
+            result.images[item.tag] = CapturedImage(cgImage: croppedImage, scale: scale)
+        }
+
+        return result
+    }
+
     private nonisolated func captureImages(
         of items: [MenuBarItem],
         scale: CGFloat,
@@ -817,6 +897,37 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
         // CGWindowListCreateImage, so skip them to avoid the perpetual
         // fail -> blacklist -> cooldown -> retry cycle.
         let capturable = items.filter { !$0.isControlItem }
+
+        // macOS 27: status items live inside MenuBarAgent — no real CGWindowIDs.
+        // Skip the CGS/SkyLight path entirely and use AX-provided bounds with a
+        // display-region SCK screenshot instead.
+        if #available(macOS 27, *) {
+            let displayID = Bridging.getActiveMenuBarDisplayID() ?? CGMainDisplayID()
+            let screenFrame = await MainActor.run {
+                NSScreen.screens.first { $0.displayID == displayID }?.frame
+            }
+
+            var axItems: [(item: MenuBarItem, bounds: CGRect)] = []
+            for item in capturable {
+                let bounds = item.bounds
+                guard !bounds.isEmpty else { continue }
+                // items.bounds is in global screen coords (Y-down); NSScreen.frame
+                // is in AppKit coords (Y-up) — but both share the same X axis and
+                // ranges overlap for on-screen items, so intersects() works as a
+                // coarse off-screen filter (negative-X hidden items are excluded).
+                if let screenFrame, !screenFrame.intersects(bounds) { continue }
+                axItems.append((item: item, bounds: bounds))
+            }
+
+            guard !axItems.isEmpty else {
+                MenuBarItemImageCache.diagLog.debug(
+                    "captureImages: no on-screen items to capture for this section (macOS 27)"
+                )
+                return CaptureResult()
+            }
+
+            return await axBoundsCapture(axItems, scale: scale, displayID: displayID)
+        }
 
         // Use individual capture after a move operation, since composite capture
         // doesn't account for overlapping items.
