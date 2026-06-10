@@ -140,6 +140,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard terminationAttemptID == attemptID else {
                 return
             }
+            // macOS 27 doesn't reliably remove our status items when the process
+            // exits, leaving a ghost icon with a dead (grayed-out) menu. Remove
+            // them explicitly while we're still alive, and give MenuBarAgent a
+            // moment to reclaim them before we actually quit.
+            if #available(macOS 27, *) {
+                appState.menuBarManager.tearDownControlItemsForTermination()
+                try? await Task.sleep(for: .milliseconds(150))
+                guard terminationAttemptID == attemptID else {
+                    return
+                }
+            }
             terminationTimeoutTask?.cancel()
             replyToTerminationRequest(sender, timedOut: false)
         }
