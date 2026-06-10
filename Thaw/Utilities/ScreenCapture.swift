@@ -137,6 +137,99 @@ enum ScreenCapture {
 
     // MARK: - ScreenCaptureKit Implementation
 
+    /// The result of capturing `MenuBarAgent`'s menu bar hosting window.
+    @available(macOS 27, *)
+    struct MenuBarHostingCapture {
+        /// The captured image of the whole menu bar (every status item
+        /// composited on a transparent background, at `scale`).
+        let image: CGImage
+        /// The hosting window's frame in global screen coordinates
+        /// (Y-down). Subtract this origin from an item's frame to map it
+        /// into the image, then multiply by `scale`.
+        let windowFrame: CGRect
+        /// The pixel scale the image was captured at.
+        let scale: CGFloat
+    }
+
+    /// Captures `MenuBarAgent`'s menu bar hosting window for a display.
+    ///
+    /// On macOS 27 every status item is composited as a subitem inside a single
+    /// full-width window owned by `MenuBarAgent`. Capturing *that window*
+    /// (rather than a display region) yields the icon glyphs on a fully
+    /// transparent background — no menu bar fill and no wallpaper bleeding
+    /// through the bar's translucency — which is a far cleaner source for
+    /// per-item thumbnails. The caller crops each item out of the returned
+    /// image using the item's AX frame and ``MenuBarHostingCapture/windowFrame``.
+    ///
+    /// - Parameter displayID: The display whose menu bar to capture.
+    /// - Returns: The capture, or `nil` if the hosting window can't be found
+    ///   or captured.
+    @available(macOS 27, *)
+    static func captureMenuBarHostingWindowAsync(
+        displayID: CGDirectDisplayID
+    ) async -> MenuBarHostingCapture? {
+        let content: SCShareableContent
+        do {
+            content = try await getShareableContent()
+        } catch {
+            diagLog.error("captureMenuBarHostingWindowAsync: SCShareableContent failed: \(error)")
+            return nil
+        }
+
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            diagLog.warning("captureMenuBarHostingWindowAsync: display \(displayID) not found")
+            return nil
+        }
+        let displayFrame = display.frame
+
+        // The hosting window: owned by MenuBarAgent, spanning the display's
+        // menu bar (full width, ~menu-bar height, anchored at the display's
+        // top-left). Note: `isOnScreen` is deliberately NOT checked — SCK
+        // reports these composited menu bar windows as off-screen even though
+        // they hold the live, rendered icons. Filtering on the MenuBarAgent
+        // bundle ID excludes the per-app status-item proxy windows (which are
+        // also full-width and off-screen). Prefer the highest windowID (most
+        // recently realized) when more than one matches the display.
+        let window = content.windows
+            .filter { w in
+                w.owningApplication?.bundleIdentifier == SharedConstants.menuBarHostingBundleID
+                    && w.frame.height <= 40
+                    && w.frame.width > displayFrame.width * 0.8
+                    && abs(w.frame.minX - displayFrame.minX) < 2
+                    && abs(w.frame.minY - displayFrame.minY) < 2
+            }
+            .max { $0.windowID < $1.windowID }
+
+        guard let window else {
+            diagLog.warning("captureMenuBarHostingWindowAsync: no MenuBarAgent hosting window on display \(displayID)")
+            return nil
+        }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = CGFloat(filter.pointPixelScale)
+
+        let configuration = SCStreamConfiguration()
+        configuration.showsCursor = false
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.width = Int((window.frame.width * scale).rounded())
+        configuration.height = Int((window.frame.height * scale).rounded())
+
+        do {
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            )
+            diagLog.debug(
+                "captureMenuBarHostingWindowAsync: captured \(image.width)×\(image.height)px " +
+                "(wid=\(window.windowID)) for displayID=\(displayID)"
+            )
+            return MenuBarHostingCapture(image: image, windowFrame: window.frame, scale: scale)
+        } catch {
+            diagLog.error("captureMenuBarHostingWindowAsync: SCScreenshotManager.captureImage failed: \(error)")
+            return nil
+        }
+    }
+
     /// Captures a composite image of all windows below the specified window using ScreenCaptureKit.
     ///
     /// - Parameters:
