@@ -774,7 +774,16 @@ extension NSScreen {
     /// more closely matches the perceived reveal state, which is what click
     /// suppression needs.
     func isSystemMenuBarVisible() -> Bool {
-        !Bridging.getMenuBarWindowList(option: [.onScreen, .activeSpace, .itemsOnly]).isEmpty
+        // macOS 27 has no enumerable status-item windows (they're composited
+        // inside MenuBarAgent), so the `.itemsOnly` list is always empty and
+        // would report the menu bar as never visible — which dead-ends every
+        // control-item click and event-suppression check. Fall back to the menu
+        // bar backdrop window's on-screen presence, which still reflects the
+        // fullscreen auto-hide state.
+        if #available(macOS 27, *) {
+            return !Bridging.getMenuBarWindowList(option: [.onScreen]).isEmpty
+        }
+        return !Bridging.getMenuBarWindowList(option: [.onScreen, .activeSpace, .itemsOnly]).isEmpty
     }
 
     /// Returns the raw frame of the application menu on this screen, as
