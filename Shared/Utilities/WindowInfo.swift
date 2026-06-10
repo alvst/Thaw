@@ -147,10 +147,18 @@ extension WindowInfo {
     static func wallpaperWindow(from windows: [WindowInfo], for display: CGDirectDisplayID) -> WindowInfo? {
         let displayBounds = CGDisplayBounds(display)
         return windows.first { window in
-            // Wallpaper window belongs to the Dock process.
-            window.owningApplication?.bundleIdentifier == "com.apple.dock" &&
-                window.title?.hasPrefix("Wallpaper") == true &&
-                displayBounds.contains(window.bounds)
+            // The wallpaper (desktop picture) window belongs to the Dock on
+            // macOS 26 and earlier; macOS 27 moved it to WindowManager.
+            let bundleID = window.owningApplication?.bundleIdentifier
+            let isWallpaperOwner: Bool
+            if #available(macOS 27, *) {
+                isWallpaperOwner = bundleID == "com.apple.dock" || bundleID == "com.apple.WindowManager"
+            } else {
+                isWallpaperOwner = bundleID == "com.apple.dock"
+            }
+            return isWallpaperOwner
+                && window.title?.hasPrefix("Wallpaper") == true
+                && displayBounds.contains(window.bounds)
         }
     }
 
@@ -166,12 +174,21 @@ extension WindowInfo {
     static func menuBarWindow(from windows: [WindowInfo], for display: CGDirectDisplayID) -> WindowInfo? {
         let displayBounds = CGDisplayBounds(display)
         return windows.first { window in
-            // Menu bar window belongs to the WindowServer process.
-            window.isWindowServerWindow &&
-                window.isOnScreen &&
-                window.layer == kCGMainMenuWindowLevel &&
-                window.title == "Menubar" &&
-                displayBounds.contains(window.bounds)
+            // The menu bar backdrop window is owned by WindowServer on macOS 26 and
+            // earlier. On macOS 27+, MenuBarAgent also renders the menu bar and can
+            // own this window, so accept it as a backdrop owner there too.
+            let isMenuBarBackdropOwner: Bool
+            if #available(macOS 27, *) {
+                isMenuBarBackdropOwner = window.isWindowServerWindow
+                    || window.owningApplication?.bundleIdentifier == "com.apple.MenuBarAgent"
+            } else {
+                isMenuBarBackdropOwner = window.isWindowServerWindow
+            }
+            return isMenuBarBackdropOwner
+                && window.isOnScreen
+                && window.layer == kCGMainMenuWindowLevel
+                && window.title == "Menubar"
+                && displayBounds.contains(window.bounds)
         }
     }
 
