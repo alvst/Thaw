@@ -197,6 +197,10 @@ final class MenuBarSection {
 
     /// A Boolean value that indicates whether the section is hidden.
     var isHidden: Bool {
+        // macOS 27 cannot hide items; every section is always shown.
+        guard Constants.supportsSectionHiding else {
+            return false
+        }
         if useIceBar {
             if controlItem.state == .showSection {
                 return false
@@ -403,6 +407,10 @@ final class MenuBarSection {
 
     /// Hides the section.
     func hide() {
+        guard Constants.supportsSectionHiding else {
+            diagLog.warning("Section hiding is currently unavailable on macOS 27")
+            return
+        }
         guard let menuBarManager, !isHidden else {
             return
         }
