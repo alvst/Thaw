@@ -623,10 +623,17 @@ final class MenuBarManager: ObservableObject {
     /// Returns a Boolean value that indicates whether the given display
     /// has a valid menu bar.
     func hasValidMenuBar(in windows: [WindowInfo], for display: CGDirectDisplayID) -> Bool {
-        guard
-            let window = WindowInfo.menuBarWindow(from: windows, for: display),
-            let element = AXHelpers.element(at: window.bounds.origin)
-        else {
+        guard let window = WindowInfo.menuBarWindow(from: windows, for: display) else {
+            return false
+        }
+        // On macOS 27+ the menu bar is hosted by MenuBarAgent rather than
+        // WindowServer. The AX element at the backdrop's origin may not report
+        // role .menuBar under the new architecture, so treat the presence of
+        // the "Menubar" backdrop window as sufficient validation.
+        if #available(macOS 27, *) {
+            return true
+        }
+        guard let element = AXHelpers.element(at: window.bounds.origin) else {
             return false
         }
         return AXHelpers.role(for: element) == .menuBar
@@ -866,6 +873,15 @@ final class MenuBarManager: ObservableObject {
     /// Returns the control item for the menu bar section with the given name.
     func controlItem(withName name: MenuBarSection.Name) -> ControlItem? {
         section(withName: name)?.controlItem
+    }
+
+    /// Removes every control item from the menu bar ahead of app termination,
+    /// so macOS 27 doesn't leave ghost icons behind (see
+    /// `ControlItem.tearDownForTermination()`).
+    func tearDownControlItemsForTermination() {
+        for section in sections {
+            section.controlItem.tearDownForTermination()
+        }
     }
 
     // MARK: - Per-Item Hotkeys
