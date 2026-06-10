@@ -1110,8 +1110,14 @@ extension HIDEventManager {
         // indicates the cursor is over empty menu bar space. WindowServer also
         // renders menu bar surfaces but is a system daemon with no bundle
         // identifier, so NSRunningApplication can't resolve it; fall back to a
-        // process-name lookup via proc_name for that case.
-        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.systemuiserver" {
+        // process-name lookup via proc_name for that case. On macOS 27+,
+        // MenuBarAgent took over rendering the menu bar and appears here instead.
+        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        if bundleID == "com.apple.systemuiserver" {
+            return false
+        }
+        // macOS 27+: MenuBarAgent renders the menu bar; treat it like SystemUIServer.
+        if #available(macOS 27, *), bundleID == "com.apple.MenuBarAgent" {
             return false
         }
         if isWindowServerPID(pid) {
