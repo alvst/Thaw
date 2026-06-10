@@ -347,7 +347,7 @@ final class SourcePIDCache {
             return state.apps
         }
 
-        let ccBundleID = "com.apple.controlcenter"
+        let ccBundleID = SharedConstants.menuBarHostingBundleID
         var appsChecked = 0
         var appsWithBar = 0
         var totalChildrenChecked = 0
