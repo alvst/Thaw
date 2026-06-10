@@ -29,7 +29,7 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     /// by this tag is a system item.
     var isSystemItem: Bool {
         switch namespace {
-        case .controlCenter, .systemUIServer, .textInputMenuAgent, .weather, .passwords, .screenCaptureUI, .ssMenuAgent, .thaw, .gamePolicyAgent:
+        case .controlCenter, .menuBarAgent, .systemUIServer, .textInputMenuAgent, .weather, .passwords, .screenCaptureUI, .ssMenuAgent, .thaw, .gamePolicyAgent:
             return true
         case .string, .uuid, .null:
             return false
@@ -50,10 +50,13 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     }
 
     /// A Boolean value that indicates whether this tag represents a
-    /// dynamically-named Control Center item (Live Activities, etc.)
-    /// with the pattern `controlCenter:Item-\d+`.
+    /// dynamically-named hosting-process item (Live Activities, etc.)
+    /// with the pattern `<hostingProcess>:Item-\d+`.
     var isControlCenterGenericItem: Bool {
-        namespace == .controlCenter && MarkerPairResolver.isGenericControlCenterTitle(title)
+        // macOS 26: the hosting namespace is Control Center; macOS 27: MenuBarAgent
+        // (see isMenuBarHostingNamespace). The generic-slot title test is shared
+        // with the marker-pair resolver so both stay in sync.
+        namespace.isMenuBarHostingNamespace && MarkerPairResolver.isGenericControlCenterTitle(title)
     }
 
     /// A Boolean value that indicates whether the item identified
@@ -64,9 +67,9 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     }
 
     /// A Boolean value that indicates whether the item identified
-    /// by this tag is a "BentoBox" item owned by Control Center.
+    /// by this tag is a "BentoBox" item owned by the menu bar hosting process.
     var isBentoBox: Bool {
-        namespace == .controlCenter && title.hasPrefix("BentoBox")
+        namespace.isMenuBarHostingNamespace && title.hasPrefix("BentoBox")
     }
 
     /// A Boolean value that indicates whether the item identified
@@ -161,10 +164,10 @@ extension MenuBarItemTag {
     /// and cannot be hidden.
     ///
     /// This list contains the "Clock", "Control Center", and "Screen Sharing" (ssMenuAgent) items.
-    static let immovableItems: [MenuBarItemTag] = [clock, controlCenter, ssMenuAgent]
+    static var immovableItems: [MenuBarItemTag] { [clock, controlCenter, ssMenuAgent] }
 
     /// An array of tags for items that can be moved, but cannot be hidden.
-    static let nonHideableItems: [MenuBarItemTag] = [visibleControlItem, audioVideoModule, faceTime, screenCaptureUI, gameMode]
+    static var nonHideableItems: [MenuBarItemTag] { [visibleControlItem, audioVideoModule, faceTime, screenCaptureUI, gameMode] }
 
     /// An array of tags for items representing Ice's control items.
     static let controlItems = ControlItem.Identifier.allCases.map(\.tag)
@@ -182,21 +185,28 @@ extension MenuBarItemTag {
 
     // MARK: Other Special Items
 
+    /// The namespace used by system-owned menu bar items (Clock, BentoBox, AudioVideoModule…).
+    ///
+    /// On macOS 26 the hosting process is Control Center; on macOS 27+ it is MenuBarAgent.
+    private static var systemHostNamespace: Namespace {
+        if #available(macOS 27, *) { .menuBarAgent } else { .controlCenter }
+    }
+
     /// The tag for the system item that appears in the menu bar
     /// during screen or audio capture.
-    static let audioVideoModule = MenuBarItemTag(namespace: .controlCenter, title: "AudioVideoModule")
+    static var audioVideoModule: MenuBarItemTag { MenuBarItemTag(namespace: systemHostNamespace, title: "AudioVideoModule") }
 
     /// The tag for the system "Clock" item.
-    static let clock = MenuBarItemTag(namespace: .controlCenter, title: "Clock")
+    static var clock: MenuBarItemTag { MenuBarItemTag(namespace: systemHostNamespace, title: "Clock") }
 
     /// The tag for the system "Control Center" item.
-    static let controlCenter = MenuBarItemTag(namespace: .controlCenter, title: "BentoBox-0")
+    static var controlCenter: MenuBarItemTag { MenuBarItemTag(namespace: systemHostNamespace, title: "BentoBox-0") }
 
     /// The tag for the system "FaceTime" item.
-    static let faceTime = MenuBarItemTag(namespace: .controlCenter, title: "FaceTime")
+    static var faceTime: MenuBarItemTag { MenuBarItemTag(namespace: systemHostNamespace, title: "FaceTime") }
 
     /// The tag for the system "Music Recognition" item.
-    static let musicRecognition = MenuBarItemTag(namespace: .controlCenter, title: "MusicRecognition")
+    static var musicRecognition: MenuBarItemTag { MenuBarItemTag(namespace: systemHostNamespace, title: "MusicRecognition") }
 
     /// The tag for the system item that appears in the menu bar
     /// during recordings started by the macOS "Screenshot" tool.
@@ -267,6 +277,20 @@ extension MenuBarItemTag {
             }
         }
 
+        /// A Boolean value that indicates whether this namespace is the system
+        /// process that owns menu bar item windows at the CG layer.
+        ///
+        /// On macOS 26 the hosting process is Control Center
+        /// (`com.apple.controlcenter`); on macOS 27 and later it is
+        /// MenuBarAgent (`com.apple.MenuBarAgent`).
+        var isMenuBarHostingNamespace: Bool {
+            if #available(macOS 27, *) {
+                return self == .menuBarAgent
+            } else {
+                return self == .controlCenter
+            }
+        }
+
         /// Creates a namespace with the given optional value.
         ///
         /// - Parameter value: An optional value for the namespace.
@@ -287,6 +311,9 @@ extension MenuBarItemTag.Namespace {
 
     /// The namespace for the "Control Center" process.
     static let controlCenter = string("com.apple.controlcenter")
+
+    /// The namespace for the "MenuBarAgent" process (macOS 27+).
+    static let menuBarAgent = string("com.apple.MenuBarAgent")
 
     /// The namespace for the "PasswordsMenuBarExtra" process.
     static let passwords = string("com.apple.Passwords.MenuBarExtra")
