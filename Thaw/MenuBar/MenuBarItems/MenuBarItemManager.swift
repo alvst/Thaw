@@ -1654,6 +1654,13 @@ extension MenuBarItemManager {
         }
 
         mutating func findSection(for item: MenuBarItem) -> MenuBarSection.Name? {
+            // macOS 27 cannot hide items, so the dividers stay collapsed on the
+            // active display and their X positions are meaningless for section
+            // classification. Treat every managed item as visible.
+            guard Constants.supportsSectionHiding else {
+                return .visible
+            }
+
             let itemBounds = Self.bestBounds(for: item)
 
             // Strict-inequality fast path for items that lie entirely on
@@ -2303,16 +2310,28 @@ extension MenuBarItemManager {
     /// the hidden and always-hidden sections are correctly ordered,
     /// arranging them into valid positions if needed.
     func cacheItemsIfNeeded() async {
-        let rawWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
-        // Exclude windowIDs already known to be system clones so their
-        // churn doesn't read as a layout change. A brand-new clone whose
-        // windowID hasn't been learned yet still triggers one recache,
-        // which resolves it, records it, and drops it; from then on its
-        // presence and removal are ignored.
-        let cloneIDs = cacheActor.cachedCloneWindowIDs
-        let itemWindowIDs = cloneIDs.isEmpty
-            ? rawWindowIDs
-            : rawWindowIDs.filter { !cloneIDs.contains($0) }
+        let itemWindowIDs: [CGWindowID]
+        if #available(macOS 27, *) {
+            // The CGS window list is empty on macOS 27 (items live inside
+            // MenuBarAgent), so the legacy path below would report 0 current
+            // IDs against N cached IDs on every tick and recache in a tight
+            // loop — a feedback storm that freezes the UI. Derive the current
+            // IDs from the same AX enumeration the cache uses, so the
+            // comparison is like-for-like and only fires on a real change.
+            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            itemWindowIDs = items.reversed().map(\.windowID)
+        } else {
+            let rawWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
+            // Exclude windowIDs already known to be system clones so their
+            // churn doesn't read as a layout change. A brand-new clone whose
+            // windowID hasn't been learned yet still triggers one recache,
+            // which resolves it, records it, and drops it; from then on its
+            // presence and removal are ignored.
+            let cloneIDs = cacheActor.cachedCloneWindowIDs
+            itemWindowIDs = cloneIDs.isEmpty
+                ? rawWindowIDs
+                : rawWindowIDs.filter { !cloneIDs.contains($0) }
+        }
         let cachedIDs = cacheActor.cachedItemWindowIDs
         if cachedIDs != itemWindowIDs {
             MenuBarItemManager.diagLog.debug("cacheItemsIfNeeded: window IDs changed (\(cachedIDs.count) cached vs \(itemWindowIDs.count) current), triggering recache")
@@ -2448,6 +2467,20 @@ extension MenuBarItemManager {
 
     /// Returns the current bounds for the given item, with a refresh fallback if the window is missing.
     private nonisolated func getCurrentBounds(for item: MenuBarItem) async throws -> CGRect {
+        // macOS 27: synthetic window IDs always fail cgsGetScreenRectForWindow
+        // (error 1000) and spam the log; skip straight to the AX enumeration,
+        // which is the only source of truth for item frames on this OS.
+        if #available(macOS 27, *) {
+            let refreshed = await MenuBarItem.getMenuBarItems(option: .onScreen)
+            if let refreshedItem = refreshed.first(where: { $0.windowID == item.windowID && $0.tag == item.tag }) ??
+                refreshed.first(where: { $0.tag.matchesIgnoringWindowID(item.tag) && !$0.isSystemClone }) ??
+                refreshed.first(where: { $0.tag.matchesIgnoringWindowID(item.tag) })
+            {
+                return refreshedItem.bounds
+            }
+            throw EventError.missingItemBounds(item)
+        }
+
         // First attempt: current windowID.
         if let bounds = Bridging.getWindowBounds(for: item.windowID) {
             return bounds
@@ -3363,6 +3396,21 @@ extension MenuBarItemManager {
             throw EventError.cannotComplete
         }
 
+        // macOS 27: hiding is unsupported, so a move whose destination is a
+        // non-visible section divider (Hidden / Always-Hidden) can never
+        // succeed. Short-circuit it here — before any cursor/input work — as a
+        // no-op so the layout planner doesn't flicker the cursor or spam errors
+        // trying to hide items the OS won't let us hide.
+        if !Constants.supportsSectionHiding {
+            let target = destination.targetItem
+            if target.isControlItem, target.tag != .visibleControlItem {
+                MenuBarItemManager.diagLog.warning(
+                    "Skipping hide-move of \(item.logString) to \(destination.logString) — section hiding is unavailable on macOS 27"
+                )
+                return
+            }
+        }
+
         // Allow right-of-item moves to proceed even when the item is at x=-1.
         // validateItemPositionAfterMove uses exactly this path to rescue stuck
         // items. Block all other moves: dragging a stuck item deeper into a
@@ -3424,6 +3472,16 @@ extension MenuBarItemManager {
         defer {
             MouseHelpers.warpCursor(to: mouseLocation)
             MouseHelpers.showCursor()
+        }
+
+        // macOS 27: status items are hosted inside MenuBarAgent and have no
+        // individual CGWindowIDs, so the windowID-addressed move events below
+        // are inert. The system still honors a location-based ⌘-drag to reorder
+        // items (verified by reverse-engineering), so delegate to that gesture.
+        // The cursor hide/warp-back defer registered above wraps this call.
+        if #available(macOS 27, *) {
+            try await moveItemViaCommandDrag(item: item, to: destination, on: resolvedDisplayID)
+            return
         }
 
         // Tracks whether any postMoveEvents attempt produced observable
@@ -3494,6 +3552,179 @@ extension MenuBarItemManager {
         await validateItemPositionAfterMove(item: item, destination: destination, on: resolvedDisplayID)
         MenuBarItemManager.diagLog.error("move: all \(maxAttempts) attempt(s) exhausted without verifying \(item.logString) reached \(destination.logString)")
         throw EventError.cannotComplete
+    }
+
+    // MARK: macOS 27 Command-drag move
+
+    /// Moves a menu bar item on macOS 27 by synthesizing the system's own
+    /// Command-drag gesture.
+    ///
+    /// macOS 27 hosts every status item inside `MenuBarAgent`'s single
+    /// compositor window, so items no longer have individual `CGWindowID`s and
+    /// the windowID-addressed move events used on earlier systems do nothing.
+    /// The system still honors a manual ⌘-drag to reorder items, hit-tested by
+    /// cursor location, so this reproduces that exact gesture: grab the item at
+    /// its own center, drag to the target edge, drop. Reverse-engineering
+    /// confirmed that the `.maskCommand` flag on the mouse events alone is
+    /// sufficient (no system-wide ⌘ keypress is required).
+    ///
+    /// Verification is by *relative AX order* rather than the exact-pixel
+    /// adjacency the windowID path checks, because the bar repacks items
+    /// contiguously after a drop, so the dragged item lands flush against its
+    /// new neighbor at a position the caller cannot predict to the pixel.
+    @available(macOS 27, *)
+    private func moveItemViaCommandDrag(
+        item: MenuBarItem,
+        to destination: MoveDestination,
+        on _: CGDirectDisplayID,
+        maxAttempts: Int = 2
+    ) async throws {
+        /// Hide-moves (destination is a non-visible section divider) are
+        /// short-circuited in move() before reaching here, since hiding is
+        /// unsupported on macOS 27. This path only handles reordering within the
+        /// visible section.
+        func isInCorrectOrder(item itemBounds: CGRect, target targetBounds: CGRect) -> Bool {
+            switch destination {
+            case .leftOfItem: itemBounds.midX < targetBounds.midX
+            case .rightOfItem: itemBounds.midX > targetBounds.midX
+            }
+        }
+
+        // Serialize with all other synthetic-event operations so two drags
+        // never overlap ("Cannot start a new drag. A previous drag has not
+        // finished.").
+        var acquiredSemaphore = false
+        do {
+            try await eventSemaphore.wait(timeout: .milliseconds(3500))
+            acquiredSemaphore = true
+        } catch is SimpleSemaphore.TimeoutError {
+            MenuBarItemManager.diagLog.error("moveItemViaCommandDrag: eventSemaphore timed out")
+            throw EventError.cannotComplete
+        }
+        defer {
+            if acquiredSemaphore {
+                Task.detached { [eventSemaphore] in await eventSemaphore.signal() }
+            }
+        }
+
+        let source = try getEventSource()
+        let onScreenFrames = NSScreen.screens.map(\.frame)
+
+        for attempt in 1 ... max(1, maxAttempts) {
+            guard !Task.isCancelled else {
+                throw EventError.cannotComplete
+            }
+
+            let itemBounds = try await getCurrentBounds(for: item)
+            let targetBounds = try await getCurrentBounds(for: destination.targetItem)
+
+            if isInCorrectOrder(item: itemBounds, target: targetBounds) {
+                MenuBarItemManager.diagLog.debug(
+                    "moveItemViaCommandDrag: \(item.logString) already \(destination.logString); done"
+                )
+                return
+            }
+
+            let start = CGPoint(x: itemBounds.midX, y: itemBounds.midY)
+            let dropX: CGFloat = switch destination {
+            case .leftOfItem: targetBounds.minX - 2
+            case .rightOfItem: targetBounds.maxX + 2
+            }
+            let end = CGPoint(x: dropX, y: targetBounds.midY)
+
+            // Bail before dragging if either endpoint is off every screen — the
+            // drop would be rejected and the attempt wasted.
+            let endpointsOnScreen = onScreenFrames.contains { $0.contains(start) }
+                && onScreenFrames.contains { $0.contains(end) }
+            guard endpointsOnScreen else {
+                MenuBarItemManager.diagLog.debug(
+                    "moveItemViaCommandDrag: drop endpoint off-screen " +
+                        "(start=(\(Int(start.x)),\(Int(start.y))) end=(\(Int(end.x)),\(Int(end.y)))); skipping \(item.logString)"
+                )
+                throw EventError.itemNotMovable(item)
+            }
+
+            MenuBarItemManager.diagLog.debug(
+                "moveItemViaCommandDrag attempt \(attempt): \(item.logString) " +
+                    "start=(\(Int(start.x)),\(Int(start.y))) end=(\(Int(end.x)),\(Int(end.y))) \(destination.logString)"
+            )
+
+            await postCommandDrag(from: start, to: end, source: source)
+
+            // Let MenuBarAgent settle and repack before re-reading frames.
+            try await Task.sleep(for: .milliseconds(250))
+
+            let newItemBounds = try await getCurrentBounds(for: item)
+            let newTargetBounds = try await getCurrentBounds(for: destination.targetItem)
+            if isInCorrectOrder(item: newItemBounds, target: newTargetBounds) {
+                MenuBarItemManager.diagLog.debug("moveItemViaCommandDrag: verified after attempt \(attempt)")
+                return
+            }
+            MenuBarItemManager.diagLog.debug(
+                "moveItemViaCommandDrag: attempt \(attempt) did not achieve order, retrying"
+            )
+        }
+
+        MenuBarItemManager.diagLog.error(
+            "moveItemViaCommandDrag: exhausted \(maxAttempts) attempts moving \(item.logString) \(destination.logString)"
+        )
+        throw EventError.cannotComplete
+    }
+
+    /// Posts a Command-held left-button drag from `start` to `end`, reproducing
+    /// the manual gesture macOS 27 honors for reordering menu bar items.
+    ///
+    /// Uses the `.maskCommand` flag on each mouse event (no separate ⌘ key
+    /// event, which would risk a stuck modifier if a move is interrupted). The
+    /// motion is broken into small steps with short pauses so MenuBarAgent
+    /// tracks the drag — values mirror those verified during reverse
+    /// engineering.
+    @available(macOS 27, *)
+    private nonisolated func postCommandDrag(
+        from start: CGPoint,
+        to end: CGPoint,
+        source: CGEventSource
+    ) async {
+        let tap: CGEventTapLocation = .cghidEventTap
+
+        func post(_ type: CGEventType, _ location: CGPoint) {
+            guard let event = CGEvent(
+                mouseEventSource: source,
+                mouseType: type,
+                mouseCursorPosition: location,
+                mouseButton: .left
+            ) else {
+                return
+            }
+            event.flags = .maskCommand
+            event.post(tap: tap)
+        }
+
+        func pause(_ ms: Int) async {
+            try? await Task.sleep(for: .milliseconds(ms))
+        }
+
+        // Move onto the item, then press with Command held.
+        post(.mouseMoved, start)
+        await pause(30)
+        post(.leftMouseDown, start)
+        await pause(60)
+
+        // Smooth drag so the agent registers the motion.
+        let steps = 24
+        for i in 1 ... steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            let point = CGPoint(
+                x: start.x + (end.x - start.x) * t,
+                y: start.y + (end.y - start.y) * t
+            )
+            post(.leftMouseDragged, point)
+            await pause(16)
+        }
+
+        // Release at the destination.
+        post(.leftMouseUp, end)
+        await pause(40)
     }
 }
 
@@ -6824,6 +7055,14 @@ extension MenuBarItemManager {
     /// - Returns: The number of items that failed to move.
     @MainActor
     func restoreBlockedItemsToVisible() async -> Int {
+        // macOS 27: items are composited inside MenuBarAgent and can't be moved
+        // off-screen, so none can ever be stuck "blocked" at x=-1. Skip the AX
+        // enumeration and move attempts entirely so quitting is instant instead
+        // of stalling on this teardown work (and its termination timeout).
+        if #available(macOS 27, *) {
+            return 0
+        }
+
         MenuBarItemManager.diagLog.info("Checking for blocked items (x=-1) to restore before app termination")
 
         guard let appState else {
