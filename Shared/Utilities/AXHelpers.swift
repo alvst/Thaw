@@ -59,6 +59,25 @@ enum AXHelpers {
         queue.sync { try? element.role() }
     }
 
+    /// The element's `AXTitle`, when present. On macOS 27 most menu bar
+    /// item elements leave this empty, so callers fall back to ``identifier``.
+    static func title(for element: UIElement) -> String? {
+        queue.sync { try? element.attribute(.title) }
+    }
+
+    /// The element's `AXIdentifier`, when present. Thaw sets a stable
+    /// identifier on its control-item buttons so they can be recognized in
+    /// the macOS 27 Accessibility-based enumeration.
+    static func identifier(for element: UIElement) -> String? {
+        queue.sync { try? element.attribute(.identifier) }
+    }
+
+    /// The element's `AXSubrole`, when present. Used to distinguish menu bar
+    /// status items from incidental children (popovers, menus) on macOS 27.
+    static func subrole(for element: UIElement) -> String? {
+        queue.sync { try? element.attribute(.subrole) }
+    }
+
     static func pid(for element: UIElement) -> pid_t? {
         queue.sync {
             var pid: pid_t = 0
