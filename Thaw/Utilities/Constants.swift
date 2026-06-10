@@ -30,6 +30,26 @@ enum Constants {
 
     // swiftlint:enable force_unwrapping
 
+    // MARK: - OS capabilities
+
+    /// Whether menu bar section hiding is supported on the current OS.
+    ///
+    /// macOS 27 (Golden Gate) moved status-item hosting into `MenuBarAgent` and
+    /// removed every mechanism a third-party app could use to hide items:
+    /// expanding a divider no longer reflows neighbors off-screen, a synthesized
+    /// ⌘-drag cannot drop an item off-screen (the bar repacks), and items have no
+    /// externally addressable window for the SkyLight status-bar APIs. The app
+    /// therefore runs in **reorder-only** mode on macOS 27 — hiding/show-on-hover
+    /// and the section dividers' expand-to-hide behavior are disabled, and the
+    /// hide UI is replaced with an "unavailable" notice.
+    static var supportsSectionHiding: Bool {
+        if #available(macOS 27, *) {
+            return false
+        } else {
+            return true
+        }
+    }
+
     /// The brightness threshold above which the menu bar is considered "bright".
     /// When the menu bar brightness exceeds this value, items should use dark colors.
     /// Used for non-notched displays.
