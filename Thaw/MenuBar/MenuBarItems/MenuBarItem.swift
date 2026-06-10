@@ -334,7 +334,7 @@ extension MenuBarItem {
     ) -> [MenuBarItem] {
         var items = windows.map { window in
             if let title = window.title, title.hasPrefix("Thaw.ControlItem.") {
-                let ccBundleID = "com.apple.controlcenter"
+                let ccBundleID = SharedConstants.menuBarHostingBundleID
                 if window.owningApplication?.bundleIdentifier == ccBundleID ||
                     window.ownerPID == ProcessInfo.processInfo.processIdentifier
                 {
@@ -373,7 +373,7 @@ extension MenuBarItem {
         // Single batch XPC call — resolves all PIDs in one request,
         // avoiding concurrent thread explosion in the XPC service.
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let ccBundleID = "com.apple.controlcenter"
+        let ccBundleID = SharedConstants.menuBarHostingBundleID
 
         let controlItemIndices = Set(windows.indices.filter { i in
             guard let title = windows[i].title, title.hasPrefix("Thaw.ControlItem.") else {
@@ -482,6 +482,16 @@ extension MenuBarItem {
         diagLog.debug(
             "getMenuBarItems: starting (resolveSourcePID=\(resolveSourcePID))"
         )
+
+        // macOS 27 removed the WindowServer menu-bar-item window list that the
+        // CGS path depends on. Enumerate through the Accessibility tree instead,
+        // which still exposes every item with direct source attribution.
+        if #available(macOS 27, *) {
+            let items = MenuBarItemAXProvider.menuBarItems(on: display, option: option)
+            diagLog.debug("getMenuBarItems: returned \(items.count) items (AX path)")
+            return items
+        }
+
         let items = await getMenuBarItemsExperimental(
             on: display,
             option: option,
@@ -604,9 +614,9 @@ extension MenuBarItemTag.Namespace {
     @MainActor
     init(uncheckedItemWindow itemWindow: WindowInfo, sourcePID: pid_t?) {
         // Check for our own control items by title and owner.
-        // On macOS 26, these are owned by Control Center.
+        // On macOS 26 these are owned by Control Center; on macOS 27+ by MenuBarAgent.
         if let title = itemWindow.title, title.hasPrefix("Thaw.ControlItem.") {
-            let ccBundleID = "com.apple.controlcenter"
+            let ccBundleID = SharedConstants.menuBarHostingBundleID
             if itemWindow.owningApplication?.bundleIdentifier == ccBundleID ||
                 itemWindow.ownerPID == ProcessInfo.processInfo.processIdentifier
             {
