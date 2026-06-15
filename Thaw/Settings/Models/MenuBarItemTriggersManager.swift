@@ -155,7 +155,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// edits, the safety timer) or after a debounce when `false` (live state
     /// changes).
     private func evaluate(for state: SystemState, force: Bool) {
-        guard appState != nil else { return }
+        guard let appState else { return }
 
         let liveIDs = Set(triggers.map(\.id))
         lastAppliedReveal = lastAppliedReveal.filter { liveIDs.contains($0.key) }
@@ -164,10 +164,17 @@ final class MenuBarItemTriggersManager: ObservableObject {
             pendingApplyTasks[id] = nil
         }
 
+        let presentIdentifiers = Set(appState.itemManager.itemCache.managedItems.map(\.tag.tagIdentifier))
+
         let now = Date()
         for trigger in triggers where trigger.isEnabled {
             guard !trigger.itemIdentifier.isEmpty else { continue }
             guard isAvailable(trigger) else { continue }
+
+            // Skip without recording when the target item isn't present yet
+            // (e.g. its app hasn't launched), so the trigger re-applies once
+            // the item appears rather than getting stuck as "already applied".
+            guard presentIdentifiers.contains(trigger.itemIdentifier) else { continue }
 
             let reveal = trigger.shouldReveal(state: state, now: now)
 
@@ -222,8 +229,15 @@ final class MenuBarItemTriggersManager: ObservableObject {
     }
 
     /// Records the reveal decision as applied and moves the target item.
+    ///
+    /// Does nothing (and does not record the decision) when the target item
+    /// isn't currently present, so the trigger re-applies once it appears.
     private func apply(_ trigger: MenuBarItemTrigger, reveal: Bool) {
         guard let appState else { return }
+        let present = appState.itemManager.itemCache.managedItems
+            .contains { $0.tag.tagIdentifier == trigger.itemIdentifier }
+        guard present else { return }
+
         lastAppliedReveal[trigger.id] = reveal
 
         let section = reveal ? trigger.revealSection : trigger.hideSection
