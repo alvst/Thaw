@@ -146,6 +146,18 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         self == .batteryBelow || self == .batteryAtOrAbove
     }
 
+    /// How long a flipped condition of this kind must hold before its item
+    /// is moved. Battery percentage thresholds use a long settle to absorb
+    /// readings that jitter around the threshold; discrete sources (app
+    /// focus, network, etc.) use a short settle so they feel responsive
+    /// while still coalescing rapid transients like quick app switching.
+    var settleInterval: Duration {
+        switch self {
+        case .batteryBelow, .batteryAtOrAbove: .seconds(6)
+        default: .seconds(1)
+        }
+    }
+
     /// The editor UI this kind needs.
     var editor: TriggerConditionEditor {
         switch self {

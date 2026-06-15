@@ -196,10 +196,14 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
     /// Schedules a debounced apply, re-checking the live state when the
     /// debounce elapses so a decision that flipped back is never acted on.
+    /// The settle interval is per-condition (long for battery thresholds,
+    /// short for discrete sources) so app/network/focus triggers stay
+    /// responsive.
     private func scheduleDebouncedApply(for triggerID: UUID) {
         guard pendingApplyTasks[triggerID] == nil else { return }
+        let settle = triggers.first(where: { $0.id == triggerID })?.condition.kind.settleInterval ?? flipDebounce
         pendingApplyTasks[triggerID] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: self?.flipDebounce ?? .seconds(6))
+            try? await Task.sleep(for: settle)
             guard !Task.isCancelled, let self else { return }
             self.pendingApplyTasks[triggerID] = nil
 

@@ -63,6 +63,7 @@ struct TriggersSettingsPane: View {
                         appOptions: appOptions,
                         availableKinds: availableKinds(currentKind: trigger.condition.kind),
                         invertEnabled: flags.isEnabled(.invertAction),
+                        conditionActive: isConditionActive(trigger.condition.kind),
                         focusedField: $focusedField,
                         onDelete: { manager.remove(id: trigger.id) }
                     )
@@ -93,6 +94,14 @@ struct TriggersSettingsPane: View {
             guard let feature = kind.requiredFeature else { return true }
             return flags.isEnabled(feature)
         }
+    }
+
+    /// Whether the given condition kind's feature is currently enabled (or
+    /// it is an always-available power condition). A trigger whose condition
+    /// is inactive will not be evaluated.
+    private func isConditionActive(_ kind: TriggerConditionKind) -> Bool {
+        guard let feature = kind.requiredFeature else { return true }
+        return flags.isEnabled(feature)
     }
 
     // MARK: Options refresh
@@ -200,6 +209,7 @@ private struct TriggerRow: View {
     let appOptions: [TriggerAppOption]
     let availableKinds: [TriggerConditionKind]
     let invertEnabled: Bool
+    let conditionActive: Bool
     var focusedField: FocusState<String?>.Binding
     let onDelete: () -> Void
 
@@ -230,6 +240,9 @@ private struct TriggerRow: View {
                 itemPicker
                 conditionPicker
                 conditionEditor
+                if trigger.isEnabled, !conditionActive {
+                    inactiveConditionWarning
+                }
                 sectionPickers
                 if invertEnabled {
                     Toggle("Hide the item while the condition is met (invert)", isOn: $trigger.invert)
@@ -285,6 +298,18 @@ private struct TriggerRow: View {
                 Text(kind.displayString).tag(kind)
             }
         }
+    }
+
+    private var inactiveConditionWarning: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("This condition is turned off in Developer settings, so the trigger won't run.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -391,15 +416,7 @@ private struct TriggerRow: View {
     private var bundleIDBinding: Binding<String> {
         Binding(
             get: { trigger.condition.bundleID ?? "" },
-            set: { newValue in
-                trigger.condition = trigger.condition.withBundleID(newValue)
-                // Cache a display name for the trigger if none set yet.
-                if trigger.name.trimmingCharacters(in: .whitespaces).isEmpty,
-                   let app = appOptions.first(where: { $0.bundleID == newValue })
-                {
-                    trigger.itemDisplayName = trigger.itemDisplayName.isEmpty ? app.name : trigger.itemDisplayName
-                }
-            }
+            set: { trigger.condition = trigger.condition.withBundleID($0) }
         )
     }
 
