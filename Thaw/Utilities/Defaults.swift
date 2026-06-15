@@ -314,6 +314,7 @@ extension Defaults {
         // MARK: Menu Bar Item Triggers
 
         case menuBarItemTriggers = "MenuBarItemTriggers"
+        case triggerFeatureFlags = "TriggerFeatureFlags"
 
         // MARK: Deprecated (Appearance Settings)
 

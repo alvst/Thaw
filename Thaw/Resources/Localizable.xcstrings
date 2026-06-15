@@ -123,6 +123,9 @@
     "%@ (not present)" : {
 
     },
+    "%@ (not running)" : {
+
+    },
     "%@ %@ Section" : {
       "comment" : "A menu item title that toggles the visibility of a section in the menu bar. The argument is the name of the section.",
       "localizations" : {
@@ -3261,7 +3264,7 @@
         }
       }
     },
-    "Add a trigger to reveal a menu bar item when a power condition is met." : {
+    "Add a trigger to reveal a menu bar item when a condition is met." : {
 
     },
     "Add Application Manually" : {
@@ -4587,6 +4590,9 @@
           }
         }
       }
+    },
+    "Application" : {
+
     },
     "Apply" : {
       "comment" : "A button that applies the current value of a slider to a setting.",
@@ -7581,7 +7587,7 @@
         }
       }
     },
-    "Automatically reveal a menu bar item while a condition is met, then hide it again when the condition no longer applies." : {
+    "Automatically reveal a menu bar item while a condition is met, then hide it again when the condition no longer applies. Enable additional condition types in the Developer pane." : {
 
     },
     "Automation" : {
@@ -10566,6 +10572,9 @@
         }
       }
     },
+    "Choose an app…" : {
+
+    },
     "Choose image…" : {
       "comment" : "A button to import a custom icon for the app.",
       "localizations" : {
@@ -13440,6 +13449,9 @@
     "Detect the menu bar items on your Mac and where they're positioned." : {
 
     },
+    "Developer" : {
+
+    },
     "Development" : {
       "comment" : "A label for the \"Development\" segment in the update channel picker.",
       "localizations" : {
@@ -16300,6 +16312,9 @@
         }
       }
     },
+    "Enable experimental trigger sources one at a time. Each flag turns on its condition in the Triggers pane and starts its background monitor. Battery and power conditions are always available." : {
+
+    },
     "Enable menu bar item overflow" : {
       "comment" : "A toggle that enables or disables the overflow of menu bar items.",
       "localizations" : {
@@ -17612,6 +17627,9 @@
         }
       }
     },
+    "Experimental" : {
+
+    },
     "Export" : {
       "comment" : "A menu item that exports a profile to a file.",
       "localizations" : {
@@ -18449,6 +18467,9 @@
       }
     },
     "Found existing settings. Icon positions can't be restored." : {
+
+    },
+    "From" : {
 
     },
     "Full" : {
@@ -20242,6 +20263,9 @@
     },
     "Hide or show menu bar items on demand. Drag items between sections, keep your favorites always visible, and tuck the rest away in the always-hidden section." : {
       "comment" : "Description of the menu bar management onboarding slide."
+    },
+    "Hide the item while the condition is met (invert)" : {
+
     },
     "Hold to Preview" : {
       "comment" : "A button that, when held, allows users to preview changes in a menu bar.",
@@ -24301,6 +24325,9 @@
           }
         }
       }
+    },
+    "Live System State" : {
+
     },
     "Loading menu bar items…" : {
       "comment" : "A message displayed while waiting for menu bar items to load.",
@@ -42434,6 +42461,9 @@
         }
       }
     },
+    "To" : {
+
+    },
     "To switch profiles with Focus modes, add %@ as a Focus Filter in System Settings %@ Focus %@ [Mode] %@ Focus Filters. When a Focus mode deactivates, the display profile is automatically restored." : {
       "comment" : "A description of how to use Focus Filters to switch profiles.",
       "localizations" : {
@@ -43276,7 +43306,7 @@
     "Trigger any action with a keystroke. Combine auto-rehide timers and Focus Filter integration so Thaw adapts to whatever you're doing." : {
       "comment" : "Description of the hotkeys and automation onboarding slide."
     },
-    "Trigger name" : {
+    "Trigger Feature Flags" : {
 
     },
     "Triggers" : {
