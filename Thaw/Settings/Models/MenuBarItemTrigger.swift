@@ -6,6 +6,7 @@
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
+import AppKit
 import Foundation
 
 // MARK: - TriggerCondition
@@ -41,6 +42,7 @@ enum TriggerCondition: Codable, Hashable {
     // Time / Focus
     case schedule(startMinutes: Int, endMinutes: Int)
     case focusActive
+    case focusMode(name: String)
 
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
@@ -80,7 +82,69 @@ enum TriggerCondition: Codable, Hashable {
             return Self.isWithinSchedule(now: now, startMinutes: start, endMinutes: end)
         case .focusActive:
             return state.isFocusActive
+        case let .focusMode(name):
+            return !name.isEmpty
+                && state.activeFocusModeName?.caseInsensitiveCompare(name) == .orderedSame
         }
+    }
+
+    /// A short human-readable summary of the condition, used to build a
+    /// smart default trigger name (e.g. "Battery is below 20%").
+    var summary: String {
+        switch self {
+        case let .batteryBelow(percentage):
+            return "Battery is below \(Int(percentage.rounded()))%"
+        case let .batteryAtOrAbove(percentage):
+            return "Battery is at or above \(Int(percentage.rounded()))%"
+        case .onACPower:
+            return "Connected to power"
+        case .onBatteryPower:
+            return "Running on battery"
+        case .charging:
+            return "Battery is charging"
+        case let .frontmostApp(bundleID):
+            return bundleID.isEmpty ? "An app is frontmost" : "\(Self.appDisplayName(bundleID)) is frontmost"
+        case let .appRunning(bundleID):
+            return bundleID.isEmpty ? "An app is running" : "\(Self.appDisplayName(bundleID)) is running"
+        case .networkConnected:
+            return "Network is connected"
+        case .vpnActive:
+            return "VPN is active"
+        case let .wifiSSID(name):
+            return name.isEmpty ? "On a Wi-Fi network" : "On Wi-Fi “\(name)”"
+        case let .bluetoothConnected(name):
+            return name.isEmpty ? "A Bluetooth device is connected" : "“\(name)” is connected"
+        case let .audioOutput(substring):
+            return substring.isEmpty ? "Audio output device" : "Audio output is “\(substring)”"
+        case .externalDisplayConnected:
+            return "External display is connected"
+        case let .schedule(start, end):
+            return "Between \(Self.clockString(start)) and \(Self.clockString(end))"
+        case .focusActive:
+            return "A Focus is active"
+        case let .focusMode(name):
+            return name.isEmpty ? "A Focus mode is active" : "Focus mode is “\(name)”"
+        }
+    }
+
+    /// Best-effort friendly app name from a bundle id (falls back to the
+    /// bundle id when the app can't be located).
+    private static func appDisplayName(_ bundleID: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            let name = url.deletingPathExtension().lastPathComponent
+            if !name.isEmpty { return name }
+        }
+        return bundleID
+    }
+
+    /// Formats minutes-from-midnight as a short clock string (e.g. "9:00 AM").
+    private static func clockString(_ minutes: Int) -> String {
+        let date = Calendar.current.date(
+            bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()
+        ) ?? Date()
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     /// Whether `now` falls within the daily window `[start, end)`, handling
@@ -117,6 +181,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case externalDisplay
     case schedule
     case focusActive
+    case focusModeNamed
 
     var id: String { rawValue }
 
@@ -137,7 +202,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .audioOutput: "Audio output device"
         case .externalDisplay: "External display is connected"
         case .schedule: "During time window"
-        case .focusActive: "Focus is active"
+        case .focusActive: "Any Focus is active"
+        case .focusModeNamed: "Focus mode is"
         }
     }
 
@@ -166,6 +232,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .wifiSSID: .text(prompt: "Network name")
         case .bluetoothConnected: .text(prompt: "Device name")
         case .audioOutput: .text(prompt: "Device name contains")
+        case .focusModeNamed: .text(prompt: "Focus mode name (e.g. Work)")
         case .schedule: .timeRange
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive:
@@ -189,6 +256,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .externalDisplay: .display
         case .schedule: .schedule
         case .focusActive: .focusMode
+        case .focusModeNamed: .focusMode
         }
     }
 }
@@ -223,6 +291,7 @@ extension TriggerCondition {
         case .externalDisplayConnected: .externalDisplay
         case .schedule: .schedule
         case .focusActive: .focusActive
+        case .focusMode: .focusModeNamed
         }
     }
 
@@ -245,7 +314,7 @@ extension TriggerCondition {
     /// The free-text value, for text conditions.
     var text: String? {
         switch self {
-        case let .wifiSSID(name), let .bluetoothConnected(name), let .audioOutput(name): name
+        case let .wifiSSID(name), let .bluetoothConnected(name), let .audioOutput(name), let .focusMode(name): name
         default: nil
         }
     }
@@ -276,6 +345,7 @@ extension TriggerCondition {
         case .externalDisplay: .externalDisplayConnected
         case .schedule: .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
         case .focusActive: .focusActive
+        case .focusModeNamed: .focusMode(name: "")
         }
     }
 
@@ -290,6 +360,7 @@ extension TriggerCondition {
         case .wifiSSID: .wifiSSID(name: old.text ?? "")
         case .bluetoothConnected: .bluetoothConnected(name: old.text ?? "")
         case .audioOutput: .audioOutput(contains: old.text ?? "")
+        case .focusModeNamed: .focusMode(name: old.text ?? "")
         case .schedule:
             old.scheduleWindow.map { TriggerCondition.schedule(startMinutes: $0.start, endMinutes: $0.end) }
                 ?? .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
@@ -323,6 +394,7 @@ extension TriggerCondition {
         case .wifiSSID: .wifiSSID(name: value)
         case .bluetoothConnected: .bluetoothConnected(name: value)
         case .audioOutput: .audioOutput(contains: value)
+        case .focusMode: .focusMode(name: value)
         default: self
         }
     }
@@ -408,11 +480,20 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         return invert ? !satisfied : satisfied
     }
 
-    /// A name suitable for display.
+    /// A smart, auto-generated title combining the target item and the
+    /// condition, e.g. "Battery: Battery is below 20%". Used as the default
+    /// display name and the name-field placeholder.
+    var autoTitle: String {
+        let summary = condition.summary
+        if itemDisplayName.isEmpty { return summary }
+        return "\(itemDisplayName): \(summary)"
+    }
+
+    /// A name suitable for display: the user's custom name if set, otherwise
+    /// the smart auto-generated title.
     var displayName: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { return trimmed }
-        if !itemDisplayName.isEmpty { return itemDisplayName }
-        return "Untitled Trigger"
+        return autoTitle
     }
 }

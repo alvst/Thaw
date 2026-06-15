@@ -114,6 +114,7 @@ struct DeveloperSettingsPane: View {
                 stateRow("Audio output", state.audioOutputDeviceName ?? "—")
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
                 stateRow("Focus active", state.isFocusActive ? "Yes" : "No")
+                stateRow("Focus mode", state.activeFocusModeName ?? "—")
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -12,6 +12,7 @@ import CoreAudio
 import CoreLocation
 import CoreWLAN
 import Foundation
+import Intents
 import IOBluetooth
 import Network
 import SystemConfiguration
@@ -56,6 +57,10 @@ struct SystemState: Equatable {
     /// (best-effort).
     var isFocusActive: Bool
 
+    /// The active app-defined Focus mode name (from ``ThawFocusFilter``),
+    /// or `nil` when no Thaw Focus Filter is currently applied.
+    var activeFocusModeName: String?
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -67,7 +72,8 @@ struct SystemState: Equatable {
         audioOutputDeviceName: String? = nil,
         screenCount: Int = 1,
         externalDisplayConnected: Bool = false,
-        isFocusActive: Bool = false
+        isFocusActive: Bool = false,
+        activeFocusModeName: String? = nil
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -80,6 +86,7 @@ struct SystemState: Equatable {
         self.screenCount = screenCount
         self.externalDisplayConnected = externalDisplayConnected
         self.isFocusActive = isFocusActive
+        self.activeFocusModeName = activeFocusModeName
     }
 }
 
@@ -162,6 +169,9 @@ final class SystemStateMonitor: ObservableObject {
 
         if flags.isEnabled(.wifiSSID) {
             ensureLocationAuthorization()
+        }
+        if flags.isEnabled(.focusMode) {
+            ensureFocusAuthorization()
         }
 
         let needsPoll = flags.isEnabled(.audioOutput)
@@ -284,6 +294,14 @@ final class SystemStateMonitor: ObservableObject {
         }
     }
 
+    /// Requests Focus authorization the first time the Focus feature is
+    /// enabled, so `INFocusStatusCenter` can report the focus status.
+    private func ensureFocusAuthorization() {
+        if INFocusStatusCenter.default.authorizationStatus == .notDetermined {
+            INFocusStatusCenter.default.requestAuthorization { _ in }
+        }
+    }
+
     // MARK: Network
 
     private func setNetworkMonitoring(_ enabled: Bool) {
@@ -326,13 +344,20 @@ final class SystemStateMonitor: ObservableObject {
         let vpn = flags.isEnabled(.vpn) ? Self.isVPNActive() : false
         let ssid = flags.isEnabled(.wifiSSID) ? Self.currentWiFiSSID() : nil
         let focus = flags.isEnabled(.focusMode) ? Self.isFocusActive() : false
+        // The Focus mode is the profile requested by Thaw's Focus Filter,
+        // which the filter itself sets on activation and clears on
+        // deactivation (see ThawFocusModeStore).
+        let focusMode = flags.isEnabled(.focusMode) ? ThawFocusModeStore.activeMode : nil
 
         update {
             if flags.isEnabled(.audioOutput) { $0.audioOutputDeviceName = audio }
             if flags.isEnabled(.bluetooth) { $0.connectedBluetoothDeviceNames = bluetooth }
             if flags.isEnabled(.vpn) { $0.isVPNActive = vpn }
             if flags.isEnabled(.wifiSSID) { $0.wifiSSID = ssid }
-            if flags.isEnabled(.focusMode) { $0.isFocusActive = focus }
+            if flags.isEnabled(.focusMode) {
+                $0.isFocusActive = focus
+                $0.activeFocusModeName = focusMode
+            }
         }
     }
 
@@ -362,7 +387,8 @@ final class SystemStateMonitor: ObservableObject {
             audioOutputDeviceName: defaultAudioOutputDeviceName(),
             screenCount: NSScreen.screens.count,
             externalDisplayConnected: hasExternalDisplay(),
-            isFocusActive: isFocusActive()
+            isFocusActive: isFocusActive(),
+            activeFocusModeName: ThawFocusModeStore.activeMode
         )
     }
 
@@ -450,9 +476,23 @@ final class SystemStateMonitor: ObservableObject {
         CWWiFiClient.shared().interface()?.ssid()
     }
 
-    /// Best-effort detection of an active Focus / Do Not Disturb by reading
-    /// the Do Not Disturb assertions store. Returns `false` on any failure.
+    /// Detects an active Focus / Do Not Disturb.
+    ///
+    /// Prefers the official `INFocusStatusCenter`, which reports whether a
+    /// Focus is currently silencing notifications (requires authorization,
+    /// requested when the Focus feature is enabled). Falls back to reading
+    /// the Do Not Disturb assertions store when the status is unavailable
+    /// (e.g. authorization not yet granted).
     static func isFocusActive() -> Bool {
+        if let focused = INFocusStatusCenter.default.focusStatus.isFocused {
+            return focused
+        }
+        return isFocusActiveFromAssertions()
+    }
+
+    /// File-based fallback: reads the Do Not Disturb assertions store and
+    /// returns whether any focus assertion is currently active.
+    static func isFocusActiveFromAssertions() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let url = home.appendingPathComponent("Library/DoNotDisturb/DB/Assertions.json")
         guard

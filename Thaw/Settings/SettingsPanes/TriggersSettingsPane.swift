@@ -259,7 +259,7 @@ private struct TriggerRow: View {
         HStack(spacing: 8) {
             CommitTextField(
                 title: "Trigger name",
-                prompt: selectedItemName,
+                prompt: trigger.autoTitle,
                 value: $trigger.name,
                 focusedField: focusedField,
                 focusID: "name-\(trigger.id)"

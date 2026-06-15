@@ -315,6 +315,7 @@ extension Defaults {
 
         case menuBarItemTriggers = "MenuBarItemTriggers"
         case triggerFeatureFlags = "TriggerFeatureFlags"
+        case activeFocusMode = "ActiveFocusMode"
 
         // MARK: Deprecated (Appearance Settings)
 

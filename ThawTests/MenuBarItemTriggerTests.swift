@@ -182,9 +182,27 @@ final class MenuBarItemTriggerTests: XCTestCase {
 
     // MARK: - Trigger model
 
-    func testDisplayNameFallsBackToItemName() {
-        let trigger = MenuBarItemTrigger(name: "   ", itemDisplayName: "Battery")
-        XCTAssertEqual(trigger.displayName, "Battery")
+    func testDisplayNameFallsBackToAutoTitle() {
+        let trigger = MenuBarItemTrigger(
+            name: "   ",
+            itemDisplayName: "Battery",
+            condition: .batteryBelow(percentage: 20)
+        )
+        XCTAssertEqual(trigger.displayName, "Battery: Battery is below 20%")
+    }
+
+    func testCustomNameOverridesAutoTitle() {
+        let trigger = MenuBarItemTrigger(
+            name: "Low battery",
+            itemDisplayName: "Battery",
+            condition: .batteryBelow(percentage: 20)
+        )
+        XCTAssertEqual(trigger.displayName, "Low battery")
+    }
+
+    func testAutoTitleWithoutItemName() {
+        let trigger = MenuBarItemTrigger(itemDisplayName: "", condition: .onACPower)
+        XCTAssertEqual(trigger.autoTitle, "Connected to power")
     }
 
     func testCodableRoundTrip() throws {
