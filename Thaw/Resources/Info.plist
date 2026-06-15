@@ -25,5 +25,9 @@
 	<string>file:///usr/bin/env</string>
 	<key>ThawSkyLightFrameworkPath</key>
 	<string>/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Thaw uses your location only to read the current Wi-Fi network name, so it can reveal or hide menu bar items based on the Wi-Fi network you are connected to. This is optional and used solely for the Wi-Fi trigger condition.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Thaw uses your location only to read the current Wi-Fi network name, so it can reveal or hide menu bar items based on the Wi-Fi network you are connected to. This is optional and used solely for the Wi-Fi trigger condition.</string>
 </dict>
 </plist>

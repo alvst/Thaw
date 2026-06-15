@@ -9,6 +9,7 @@
 import AppKit
 import Combine
 import CoreAudio
+import CoreLocation
 import CoreWLAN
 import Foundation
 import IOBluetooth
@@ -111,6 +112,11 @@ final class SystemStateMonitor: ObservableObject {
     // Poll timer for the sampled sources.
     private var pollTimer: Timer?
 
+    // Reading the Wi-Fi SSID requires Location authorization on modern
+    // macOS; this manager is created lazily to prompt the user only when
+    // the Wi-Fi SSID feature is enabled.
+    private var locationManager: CLLocationManager?
+
     private let diagLog = DiagLog(category: "SystemStateMonitor")
 
     // MARK: Lifecycle
@@ -153,6 +159,10 @@ final class SystemStateMonitor: ObservableObject {
         setFrontmostAppMonitoring(flags.isEnabled(.frontmostApp) || flags.isEnabled(.appRunning))
         setDisplayMonitoring(flags.isEnabled(.display))
         setNetworkMonitoring(flags.isEnabled(.network) || flags.isEnabled(.vpn))
+
+        if flags.isEnabled(.wifiSSID) {
+            ensureLocationAuthorization()
+        }
 
         let needsPoll = flags.isEnabled(.audioOutput)
             || flags.isEnabled(.bluetooth)
@@ -259,6 +269,19 @@ final class SystemStateMonitor: ObservableObject {
             }
         }
         return false
+    }
+
+    // MARK: Location (for Wi-Fi SSID)
+
+    /// Requests Location authorization the first time the Wi-Fi SSID feature
+    /// is enabled. Without it, `CWWiFiClient.ssid()` returns `nil` on modern
+    /// macOS even though the API call succeeds.
+    private func ensureLocationAuthorization() {
+        let manager = locationManager ?? CLLocationManager()
+        locationManager = manager
+        if manager.authorizationStatus == .notDetermined {
+            manager.requestWhenInUseAuthorization()
+        }
     }
 
     // MARK: Network
