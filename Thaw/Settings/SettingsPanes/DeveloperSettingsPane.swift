@@ -33,9 +33,9 @@ struct DeveloperSettingsPane: View {
             flagsSection
             liveStateSection
         }
-        .onAppear { liveState = SystemStateMonitor.fullSnapshot() }
+        .onAppear { liveState = SystemStateMonitor.fullSnapshot(flags: flags) }
         .onReceive(refreshTimer) { _ in
-            liveState = SystemStateMonitor.fullSnapshot()
+            liveState = SystemStateMonitor.fullSnapshot(flags: flags)
         }
     }
 
@@ -109,8 +109,8 @@ struct DeveloperSettingsPane: View {
                 stateRow("Running apps", "\(state.runningAppBundleIDs.count)")
                 stateRow("Network", state.isNetworkConnected ? "Connected" : "Offline")
                 stateRow("VPN", state.isVPNActive ? "Active" : "Inactive")
-                stateRow("Wi-Fi SSID", state.wifiSSID ?? "—")
-                stateRow("Bluetooth", state.connectedBluetoothDeviceNames.sorted().joined(separator: ", ").orDash)
+                stateRow("Wi-Fi SSID", flags.isEnabled(.wifiSSID) ? (state.wifiSSID ?? "—") : "Enable flag to read")
+                stateRow("Bluetooth", flags.isEnabled(.bluetooth) ? state.connectedBluetoothDeviceNames.sorted().joined(separator: ", ").orDash : "Enable flag to read")
                 stateRow("Audio output", state.audioOutputDeviceName ?? "—")
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
                 stateRow("Focus active", state.isFocusActive ? "Yes" : "No")

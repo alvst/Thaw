@@ -336,10 +336,15 @@ final class SystemStateMonitor: ObservableObject {
         }
     }
 
-    /// Samples every source directly, ignoring feature flags. Used by the
-    /// Developer pane so its live readout always reflects ground truth.
+    /// Samples sources directly for the Developer pane's live readout.
+    ///
+    /// Non-privacy-sensitive sources are always sampled so the readout shows
+    /// ground truth regardless of flags. Privacy-sensitive sources
+    /// (Bluetooth, Wi-Fi SSID) are only sampled when their flag is enabled,
+    /// so merely opening the Developer pane never triggers a Bluetooth or
+    /// Location permission prompt for a feature the user hasn't opted into.
     @MainActor
-    static func fullSnapshot() -> SystemState {
+    static func fullSnapshot(flags: TriggerFeatureFlagsManager) -> SystemState {
         let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let running = Set(
             NSWorkspace.shared.runningApplications
@@ -352,8 +357,8 @@ final class SystemStateMonitor: ObservableObject {
             runningAppBundleIDs: running,
             isNetworkConnected: isNetworkReachable(),
             isVPNActive: isVPNActive(),
-            wifiSSID: currentWiFiSSID(),
-            connectedBluetoothDeviceNames: connectedBluetoothDeviceNames(),
+            wifiSSID: flags.isEnabled(.wifiSSID) ? currentWiFiSSID() : nil,
+            connectedBluetoothDeviceNames: flags.isEnabled(.bluetooth) ? connectedBluetoothDeviceNames() : [],
             audioOutputDeviceName: defaultAudioOutputDeviceName(),
             screenCount: NSScreen.screens.count,
             externalDisplayConnected: hasExternalDisplay(),
