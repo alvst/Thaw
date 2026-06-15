@@ -1,0 +1,51 @@
+name: Feature Request
+description: Request a feature or suggest an idea.
+title: "[Feature Request] "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before submitting:** Search [open & closed suggestions](https://github.com/stonerl/Thaw/issues?q=is%3Aissue+-label%3Abug) for duplicates.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I searched existing issues (open & closed) and found no duplicates
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use Case
+      description: What are you trying to do that isn't possible or convenient right now?
+      placeholder: "I'd like to be able to…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How do you envision this working?
+      placeholder: A clear and concise description of what you'd like to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds you've tried or other ways this could work.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, mockups, screen recordings, or anything else helpful.
+    validations:
+      required: false

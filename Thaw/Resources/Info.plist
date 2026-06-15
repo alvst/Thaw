@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SUFeedURL</key>
+	<string>https://stonerl.github.io/Thaw/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>fQ2kWqCLfAPAxQX1rp8gVNoG9hlAV/Gmm7kMBbxFe+A=</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.stonerl.Thaw</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>thaw</string>
+			</array>
+		</dict>
+	</array>
+	<key>ThawRepositoryURL</key>
+	<string>https://github.com/stonerl/Thaw</string>
+	<key>ThawDonateURL</key>
+	<string>https://github.com/sponsors/stonerl</string>
+	<key>ThawMenuBarItemSpacingExecutableURI</key>
+	<string>file:///usr/bin/env</string>
+	<key>ThawSkyLightFrameworkPath</key>
+	<string>/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight</string>
+</dict>
+</plist>

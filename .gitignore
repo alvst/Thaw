@@ -1,0 +1,14 @@
+.DS_Store  
+xcuserdata/  
+build/  
+!.github/actions/build/  
+!.github/actions/build/** 
+DerivedData/
+*.ipa
+*.dSYM
+.idea/
+.vscode/
+.lefthook.yml
+.codex-home
+Sparkle
+ThawCtl/.build/

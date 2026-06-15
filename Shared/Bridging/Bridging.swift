@@ -1,0 +1,713 @@
+//
+//  Bridging.swift
+//  Project: Thaw
+//
+//  Copyright (Ice) © 2023–2025 Jordan Baird
+//  Copyright (Thaw) © 2026 Toni Förster
+//  Licensed under the GNU GPLv3
+
+import Cocoa
+import os
+@preconcurrency import ScreenCaptureKit
+
+// MARK: - Bridging
+
+/// A namespace for bridged or wrapped APIs.
+enum Bridging {
+    private static let diagLog = DiagLog(category: "Bridging")
+}
+
+// MARK: - CGSConnection
+
+extension Bridging {
+    // MARK: Private Connection Helpers
+
+    /// The identifier for the `null` window server connection.
+    private static let nullConnection: CGSConnectionID = 0
+
+    /// Returns the identifier for the main window server connection.
+    private static func getMainConnection() -> CGSConnectionID {
+        cgsMainConnectionID()
+    }
+
+    /// Returns the identifier for the window server connection
+    /// for the current thread.
+    private static func getConnectionForThread() -> CGSConnectionID {
+        cgsDefaultConnectionForThread()
+    }
+
+    // MARK: Public Connection API
+
+    /// Returns a value from the main window server connection.
+    ///
+    /// - Parameter key: A key associated with a value in the main
+    ///   window server connection.
+    static func getConnectionProperty(forKey key: String) -> Any? {
+        var value: Unmanaged<CFTypeRef>?
+        let result = cgsCopyConnectionProperty(
+            getMainConnection(),
+            getMainConnection(),
+            key as CFString,
+            &value
+        )
+        if result != .success {
+            diagLog.error("cgsCopyConnectionProperty failed with error \(result.logString)")
+        }
+        return value?.takeRetainedValue()
+    }
+
+    /// Sets a value in the main window server connection.
+    ///
+    /// - Parameters:
+    ///   - value: A value to set.
+    ///   - key: A key to associate with `value` as a property in the
+    ///     main window server connection.
+    static func setConnectionProperty(_ value: Any?, forKey key: String) {
+        let result = cgsSetConnectionProperty(
+            getMainConnection(),
+            getMainConnection(),
+            key as CFString,
+            value as CFTypeRef
+        )
+        if result != .success {
+            diagLog.error("cgsSetConnectionProperty failed with error \(result.logString)")
+        }
+    }
+}
+
+// MARK: - CGDisplay / CGSDisplay
+
+extension Bridging {
+    // MARK: Private Display Helpers
+
+    /// A display to exclude from Thaw's display enumeration while it exists.
+    ///
+    /// Set to the identifier of the transient virtual display that
+    /// VirtualDisplayProvoker creates to provoke marker-pair resolution on a
+    /// single-display machine, and cleared when it is removed. Filtering it
+    /// here keeps the phantom out of every display list derived from
+    /// getActiveDisplayList (including the active-menu-bar-display lookup),
+    /// so it never drives profile auto-switch or per-display state. nil during
+    /// normal operation, which makes the filter a no-op.
+    ///
+    /// Backed by an unfair lock: the MainActor writer (VirtualDisplayProvoker)
+    /// and the off-MainActor readers (the nonisolated image-capture tasks reach
+    /// it through getActiveMenuBarDisplayID) would otherwise race on this
+    /// non-atomic optional.
+    static var excludedDisplayID: CGDirectDisplayID? {
+        get { excludedDisplayIDStorage.withLock { $0 } }
+        set { excludedDisplayIDStorage.withLock { $0 = newValue } }
+    }
+
+    private static let excludedDisplayIDStorage = OSAllocatedUnfairLock<CGDirectDisplayID?>(initialState: nil)
+
+    private static func getActiveDisplayCount() -> UInt32? {
+        var count: UInt32 = 0
+        let result = CGGetActiveDisplayList(0, nil, &count)
+        guard result == .success else {
+            diagLog.error("CGGetActiveDisplayList failed with error \(result.logString)")
+            return nil
+        }
+        return count
+    }
+
+    private static func getActiveDisplayList() -> [CGDirectDisplayID] {
+        guard let count = getActiveDisplayCount() else {
+            return []
+        }
+        var list = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        let result = CGGetActiveDisplayList(count, &list, nil)
+        guard result == .success else {
+            diagLog.error("CGGetActiveDisplayList failed with error \(result.logString)")
+            return []
+        }
+        if let excluded = excludedDisplayID {
+            list.removeAll { $0 == excluded }
+        }
+        return list
+    }
+
+    private static func getDisplayUUID(for displayID: CGDirectDisplayID) -> CFUUID? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID) else {
+            diagLog.error("CGDisplayCreateUUIDFromDisplayID returned nil for display \(displayID)")
+            return nil
+        }
+        return uuid.takeRetainedValue()
+    }
+
+    // MARK: Public Display API
+
+    /// Returns the UUID string for a given display ID.
+    /// - Parameter displayID: The display identifier.
+    /// - Returns: The UUID string for display, or nil if unavailable.
+    static func getDisplayUUIDString(for displayID: CGDirectDisplayID) -> String? {
+        guard let uuid = getDisplayUUID(for: displayID) else {
+            return nil
+        }
+        return CFUUIDCreateString(nil, uuid) as String?
+    }
+
+    /// Returns the display ID for a given UUID string.
+    /// - Parameter uuidString: The UUID string of the display.
+    /// - Returns: The display ID, or nil if not found.
+    static func getDisplayID(for uuidString: String) -> CGDirectDisplayID? {
+        guard let uuid = CFUUIDCreateFromString(nil, uuidString as CFString) else {
+            return nil
+        }
+        return getActiveDisplayList().first { displayID in
+            guard let displayUUID = getDisplayUUID(for: displayID) else {
+                return false
+            }
+            return CFEqual(displayUUID, uuid)
+        }
+    }
+
+    /// Returns the UUID string for the display with active menu bar.
+    /// - Returns: The UUID string of the active menu bar display, or nil if unavailable.
+    static func getActiveMenuBarDisplayUUID() -> String? {
+        guard let displayID = getActiveMenuBarDisplayID() else {
+            return nil
+        }
+        return getDisplayUUIDString(for: displayID)
+    }
+
+    /// Returns the identifier of the display with the active menu bar.
+    static func getActiveMenuBarDisplayID() -> CGDirectDisplayID? {
+        guard
+            let string = cgsCopyActiveMenuBarDisplayIdentifier(getMainConnection()),
+            let uuid = CFUUIDCreateFromString(nil, string.takeRetainedValue()),
+            let displayID = getActiveDisplayList().first(where: {
+                guard let displayUUID = getDisplayUUID(for: $0) else {
+                    return false
+                }
+                return CFEqual(displayUUID, uuid)
+            })
+        else {
+            return CGMainDisplayID()
+        }
+        return displayID
+    }
+}
+
+// MARK: - CGSEvent
+
+extension Bridging {
+    /// Returns a Boolean value indicating whether the given process
+    /// is unresponsive.
+    ///
+    /// - Parameter pid: An identifier for a process.
+    static func isProcessUnresponsive(_ pid: pid_t) -> Bool {
+        var psn = ProcessSerialNumber()
+        let result = getProcessForPID(pid, &psn)
+        guard result == noErr else {
+            diagLog.error("getProcessForPID failed with error \(result)")
+            return false
+        }
+        return cgsEventIsAppUnresponsive(getMainConnection(), &psn)
+    }
+
+    /// Sets the timeout used to determine if a process is unresponsive.
+    ///
+    /// - Parameter timeout: An amount of time in seconds.
+    static func setProcessUnresponsiveTimeout(_ timeout: TimeInterval) {
+        let result = cgsEventSetAppIsUnresponsiveNotificationTimeout(getMainConnection(), timeout)
+        if result != .success {
+            diagLog.error("cgsEventSetAppIsUnresponsiveNotificationTimeout failed with error \(result.logString)")
+        }
+    }
+}
+
+// MARK: - CGSSpace
+
+extension Bridging {
+    /// Returns the identifier for the active space.
+    static func getActiveSpaceID() -> CGSSpaceID {
+        cgsGetActiveSpace(getMainConnection())
+    }
+
+    /// Returns the identifier for the current space on the given
+    /// display.
+    ///
+    /// - Parameter displayID: An identifier for a display.
+    static func getCurrentSpaceID(for displayID: CGDirectDisplayID) -> CGSSpaceID? {
+        guard let uuid = getDisplayUUID(for: displayID) else {
+            return nil
+        }
+        guard let uuidString = CFUUIDCreateString(nil, uuid) else {
+            diagLog.error("CFUUIDCreateString returned nil for display \(displayID)")
+            return nil
+        }
+        return cgsManagedDisplayGetCurrentSpace(getMainConnection(), uuidString)
+    }
+
+    /// Returns a list of identifiers for the spaces that contain the
+    /// given window.
+    ///
+    /// - Parameters:
+    ///   - windowID: An identifier for a window.
+    ///   - visibleSpacesOnly: A Boolean value that determines whether
+    ///     the returned list should only include visible spaces.
+    static func getSpaceList(for windowID: CGWindowID, visibleSpacesOnly: Bool = false) -> [CGSSpaceID] {
+        let mask: CGSSpaceMask = visibleSpacesOnly ? .allVisibleSpacesMask : .allSpacesMask
+        guard let spaces = cgsCopySpacesForWindows(getMainConnection(), mask, [windowID] as CFArray) else {
+            diagLog.error("cgsCopySpacesForWindows returned nil")
+            return []
+        }
+        guard let list = spaces.takeRetainedValue() as? [CGSSpaceID] else {
+            diagLog.error("cgsCopySpacesForWindows returned array of unexpected type")
+            return []
+        }
+        return list
+    }
+
+    /// Returns a Boolean value that indicates whether the given space
+    /// is fullscreen.
+    ///
+    /// - Parameter spaceID: An identifier for a space.
+    static func isSpaceFullscreen(_ spaceID: CGSSpaceID) -> Bool {
+        let type = cgsSpaceGetType(getMainConnection(), spaceID)
+        return type == .fullscreen
+    }
+}
+
+// MARK: - CGSWindow
+
+extension Bridging {
+    /// Returns the bounds for the given window.
+    ///
+    /// - Parameter windowID: An identifier for a window.
+    static func getWindowBounds(for windowID: CGWindowID) -> CGRect? {
+        var bounds = CGRect.zero
+        let result = cgsGetScreenRectForWindow(getConnectionForThread(), windowID, &bounds)
+        guard result == .success else {
+            diagLog.error("cgsGetScreenRectForWindow failed with error \(result.logString)")
+            return nil
+        }
+        return bounds
+    }
+
+    /// Returns the level for the given window.
+    ///
+    /// - Parameter windowID: An identifier for a window.
+    static func getWindowLevel(for windowID: CGWindowID) -> CGWindowLevel? {
+        var level: CGWindowLevel = 0
+        let result = cgsGetWindowLevel(getMainConnection(), windowID, &level)
+        guard result == .success else {
+            diagLog.error("cgsGetWindowLevel failed with error \(result.logString)")
+            return nil
+        }
+        return level
+    }
+
+    /// Returns a Boolean value that indicates whether the given window
+    /// is on the given space.
+    ///
+    /// - Parameters:
+    ///   - windowID: An identifier for a window.
+    ///   - spaceID: An identifier for a space.
+    static func isWindowOnSpace(_ windowID: CGWindowID, _ spaceID: CGSSpaceID) -> Bool {
+        let list = getSpaceList(for: windowID, visibleSpacesOnly: false)
+        return list.contains(spaceID)
+    }
+
+    /// Returns a Boolean value that indicates whether the given window
+    /// intersects the given display bounds.
+    ///
+    /// - Parameters:
+    ///   - windowID: An identifier for a window.
+    ///   - displayBounds: The bounds of a display.
+    static func windowIntersectsDisplayBounds(_ windowID: CGWindowID, _ displayBounds: CGRect) -> Bool {
+        if let windowBounds = getWindowBounds(for: windowID) {
+            return displayBounds.intersects(windowBounds)
+        }
+        return false
+    }
+
+    /// Returns a Boolean value that indicates whether the given window
+    /// is on the specified display.
+    ///
+    /// - Parameters:
+    ///   - windowID: An identifier for a window.
+    ///   - displayID: An identifier for a display.
+    static func isWindowOnDisplay(_ windowID: CGWindowID, _ displayID: CGDirectDisplayID) -> Bool {
+        let displayBounds = CGDisplayBounds(displayID)
+        return windowIntersectsDisplayBounds(windowID, displayBounds)
+    }
+
+    /// Returns a Boolean value that indicates whether the given window
+    /// is on screen.
+    ///
+    /// - Parameter windowID: An identifier for a window.
+    static func isWindowOnScreen(_ windowID: CGWindowID) -> Bool {
+        // On screen window list could potentially include menu bar
+        // items hidden via drag-and-drop (seems like a bug in macOS?).
+        //
+        // Checking individual displays could be relatively expensive,
+        // so we can at least short circuit if the window is _not_ in
+        // the list.
+        if !getOnScreenWindowList().contains(windowID) {
+            return false
+        }
+        guard let windowBounds = getWindowBounds(for: windowID) else {
+            return false
+        }
+        return getActiveDisplayList().contains { displayID in
+            let displayBounds = CGDisplayBounds(displayID)
+            return displayBounds.intersects(windowBounds)
+        }
+    }
+
+    // MARK: Private Window List Helpers
+
+    private static func getWindowCount() -> Int32? {
+        var count: Int32 = 0
+        let result = cgsGetWindowCount(getMainConnection(), nullConnection, &count)
+        guard result == .success else {
+            diagLog.error("cgsGetWindowCount failed with error \(result.logString)")
+            return nil
+        }
+        return count
+    }
+
+    private static func getOnScreenWindowCount() -> Int32? {
+        var count: Int32 = 0
+        let result = cgsGetOnScreenWindowCount(getMainConnection(), nullConnection, &count)
+        guard result == .success else {
+            diagLog.error("cgsGetOnScreenWindowCount failed with error \(result.logString)")
+            return nil
+        }
+        return count
+    }
+
+    private static func getWindowList() -> [CGWindowID] {
+        guard var count = getWindowCount() else {
+            return []
+        }
+        var list = [CGWindowID](repeating: 0, count: Int(count))
+        let result = cgsGetWindowList(getMainConnection(), nullConnection, count, &list, &count)
+        guard result == .success else {
+            diagLog.error("cgsGetWindowList failed with error \(result.logString)")
+            return []
+        }
+        return [CGWindowID](list[..<Int(count)])
+    }
+
+    private static func getOnScreenWindowList() -> [CGWindowID] {
+        guard var count = getOnScreenWindowCount() else {
+            return []
+        }
+        var list = [CGWindowID](repeating: 0, count: Int(count))
+        let result = cgsGetOnScreenWindowList(getMainConnection(), nullConnection, count, &list, &count)
+        guard result == .success else {
+            diagLog.error("cgsGetOnScreenWindowList failed with error \(result.logString)")
+            return []
+        }
+        return [CGWindowID](list[..<Int(count)])
+    }
+
+    private static func getProcessMenuBarWindowList() -> [CGWindowID] {
+        guard var count = getWindowCount() else {
+            diagLog.warning("getProcessMenuBarWindowList: getWindowCount() returned nil, cannot enumerate windows")
+            return []
+        }
+        diagLog.debug("getProcessMenuBarWindowList: total window count = \(count)")
+        var list = [CGWindowID](repeating: 0, count: Int(count))
+        let result = cgsGetProcessMenuBarWindowList(getMainConnection(), nullConnection, count, &list, &count)
+        guard result == .success else {
+            diagLog.error("cgsGetProcessMenuBarWindowList failed with error \(result.logString)")
+            return []
+        }
+        let windowList = [CGWindowID](list[..<Int(count)])
+        diagLog.debug("getProcessMenuBarWindowList: returned \(windowList.count) menu bar windows")
+        return windowList
+    }
+
+    // MARK: Public Window List API
+
+    /// Options that specify the identifiers in a window list.
+    struct WindowListOption: OptionSet {
+        let rawValue: Int
+
+        /// Specifies windows that are currently on screen.
+        static let onScreen = WindowListOption(rawValue: 1 << 0)
+
+        /// Specifies windows on the currently active space.
+        static let activeSpace = WindowListOption(rawValue: 1 << 1)
+    }
+
+    /// Options that specify the identifiers in a menu bar window list.
+    struct MenuBarWindowListOption: OptionSet {
+        let rawValue: Int
+
+        /// Specifies windows that are currently on screen.
+        static let onScreen = MenuBarWindowListOption(rawValue: 1 << 0)
+
+        /// Specifies windows on the currently active space.
+        static let activeSpace = MenuBarWindowListOption(rawValue: 1 << 1)
+
+        /// Specifies only windows that represent menu bar items.
+        static let itemsOnly = MenuBarWindowListOption(rawValue: 1 << 2)
+    }
+
+    /// Returns a list of window identifiers.
+    ///
+    /// - Parameter option: Options that filter the returned list.
+    ///   Pass an empty option set to return all available windows.
+    static func getWindowList(option: WindowListOption = []) -> [CGWindowID] {
+        let list = if option.contains(.onScreen) {
+            getOnScreenWindowList()
+        } else {
+            getWindowList()
+        }
+        if option.contains(.activeSpace) {
+            let activeSpaceID = getActiveSpaceID()
+            return list.filter { windowID in
+                isWindowOnSpace(windowID, activeSpaceID)
+            }
+        }
+        return list
+    }
+
+    /// Returns a list of window identifiers for elements in the
+    /// menu bar.
+    ///
+    /// - Parameter option: Options that filter the returned list.
+    ///   Pass an empty option set to return all available windows.
+    static func getMenuBarWindowList(option: MenuBarWindowListOption = []) -> [CGWindowID] {
+        var predicates = [(CGWindowID) -> Bool]()
+
+        if option.contains(.onScreen) {
+            let onScreenList = Set(getOnScreenWindowList())
+            diagLog.debug("getMenuBarWindowList: onScreen filter active, \(onScreenList.count) on-screen windows")
+            predicates.append { windowID in
+                onScreenList.contains(windowID)
+            }
+        }
+
+        if option.contains(.activeSpace) {
+            let activeSpaceID = getActiveSpaceID()
+            diagLog.debug("getMenuBarWindowList: activeSpace filter active, spaceID = \(activeSpaceID)")
+            predicates.append { windowID in
+                isWindowOnSpace(windowID, activeSpaceID)
+            }
+        }
+
+        if option.contains(.itemsOnly) {
+            predicates.append { windowID in
+                getWindowLevel(for: windowID) != kCGMainMenuWindowLevel
+            }
+        }
+
+        let rawList = getProcessMenuBarWindowList()
+        let filtered = rawList.filter { windowID in
+            predicates.allSatisfy { predicate in
+                predicate(windowID)
+            }
+        }
+        diagLog.debug("getMenuBarWindowList: \(rawList.count) raw -> \(filtered.count) after filtering (options: onScreen=\(option.contains(.onScreen)), activeSpace=\(option.contains(.activeSpace)), itemsOnly=\(option.contains(.itemsOnly)))")
+        return filtered
+    }
+
+    // MARK: - CGWindowList Helpers
+
+    /// Creates an `NSArray` containing the bit patterns of the given
+    /// window list.
+    ///
+    /// Pass the returned array into one of the `CGWindowList` APIs
+    /// from `CoreGraphics`.
+    ///
+    /// - Parameter windowIDs: A list of window identifiers. If the
+    ///   list is empty, or if none of its elements can represent a
+    ///   valid bit pattern, this function returns `nil`.
+    ///
+    /// - Returns: An `NSArray` where each element is a memory address
+    ///   with a bit pattern that matches an element from `windowIDs`,
+    ///   or `nil` if the array cannot be created.
+    static func createCGWindowArray(with windowIDs: [CGWindowID]) -> NSArray? {
+        var pointers: [UnsafeRawPointer?] = windowIDs.compactMap { windowID in
+            UnsafeRawPointer(bitPattern: UInt(windowID))
+        }
+        guard !pointers.isEmpty else {
+            return nil
+        }
+        var callbacks = CFArrayCallBacks(
+            version: 0,
+            retain: nil,
+            release: nil,
+            copyDescription: nil,
+            equal: nil
+        )
+        let array = CFArrayCreate(nil, &pointers, pointers.count, &callbacks)
+        return array as NSArray?
+    }
+}
+
+// MARK: - SkyLight Window Capture
+
+extension Bridging {
+    /// Captures a composite image of an array of windows using SkyLight's private API.
+    ///
+    /// This is the replacement for the deprecated `CGWindowListCreateImageFromArray` API,
+    /// which is unavailable when targeting macOS 26+. SkyLight provides equivalent
+    /// functionality through private APIs loaded dynamically at runtime.
+    ///
+    /// - Parameters:
+    ///   - windowIDs: The identifiers of the windows to capture.
+    ///   - screenBounds: The bounds to capture, specified in screen coordinates.
+    ///     Pass `nil` to capture the minimum rectangle that encloses the windows.
+    ///   - options: Options that specify which parts of the windows are captured.
+    /// - Returns: The captured image, or `nil` if capture failed.
+    static func captureWindowsImage(
+        windowIDs: [CGWindowID],
+        screenBounds: CGRect? = nil,
+        options: CGWindowImageOption = []
+    ) -> CGImage? {
+        guard let fn = SkyLightAPI.createImageFromArray else {
+            diagLog.error("captureWindowsImage: SkyLight API not available (SLWindowListCreateImageFromArray not found)")
+            return nil
+        }
+
+        guard let windowArray = createCGWindowArray(with: windowIDs) else {
+            diagLog.warning("captureWindowsImage: createCGWindowArray returned nil for \(windowIDs.count) window IDs")
+            return nil
+        }
+
+        let bounds = screenBounds ?? .null
+        let boundsDesc = bounds.isNull ? "null (auto)" : String(format: "(%.0f,%.0f %.0fx%.0f)", bounds.origin.x, bounds.origin.y, bounds.width, bounds.height)
+        diagLog.debug("captureWindowsImage: using SkyLight API, bounds=\(boundsDesc), windowCount=\(windowIDs.count), options=\(options.rawValue)")
+
+        // Use SkyLight's private API instead of deprecated CGWindowListCreateImageFromArray
+        guard let image = fn(bounds, windowArray as CFArray, options)?.takeRetainedValue() else {
+            diagLog.warning("captureWindowsImage: SLWindowListCreateImageFromArray returned nil for \(windowIDs.count) windows (IDs: \(windowIDs.prefix(5)))")
+            return nil
+        }
+
+        diagLog.debug("captureWindowsImage: captured \(windowIDs.count) windows → \(image.width)×\(image.height)px")
+        return image
+    }
+}
+
+// MARK: - ScreenCaptureKit Window Capture
+
+extension Bridging {
+    /// Captures a composite image of an array of windows using ScreenCaptureKit.
+    ///
+    /// Async, leak-free replacement for captureWindowsImage. Use this for any
+    /// window set whose union bounds fit within a display. For menu-bar items
+    /// in hidden / always-hidden sections (positioned at large negative x),
+    /// stay on captureWindowsImage: SCK's display+including filter returns
+    /// error -3812 for sourceRects outside display bounds, and the
+    /// desktopIndependentWindow filter returns -3811 for those windows too.
+    ///
+    /// - Parameters:
+    ///   - windowIDs: The identifiers of the windows to capture.
+    ///   - screenBounds: The bounds to capture, specified in screen coordinates.
+    ///     Pass nil (or CGRect.null) to capture the minimum rectangle that
+    ///     encloses the selected windows.
+    ///   - options: Capture options. boundsIgnoreFraming maps to
+    ///     ignoreShadowsDisplay; nominalResolution forces 1x scale.
+    /// - Returns: The captured image, or nil if capture failed.
+    static func captureWindowsImageSCK(
+        windowIDs: [CGWindowID],
+        screenBounds: CGRect? = nil,
+        options: CGWindowImageOption = []
+    ) async -> CGImage? {
+        guard !windowIDs.isEmpty else {
+            diagLog.warning("captureWindowsImageSCK: empty windowIDs")
+            return nil
+        }
+
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: false
+            )
+        } catch {
+            diagLog.error("captureWindowsImageSCK: SCShareableContent failed: \(error)")
+            return nil
+        }
+
+        // Preserve caller's z-order so the composite renders correctly.
+        let scWindows = windowIDs.compactMap { id in
+            content.windows.first { $0.windowID == id }
+        }
+
+        // Require an exact match. Partial captures are unsafe: cache composites
+        // rely on the result covering every requested window's bounds for the
+        // post-capture crop math, and color samplers rely on every requested
+        // window being included for the averaged color to mean anything.
+        // Fail fast so callers fall back cleanly to SkyLight or skip the tick.
+        guard scWindows.count == windowIDs.count else {
+            let matched = Set(scWindows.map(\.windowID))
+            let missing = windowIDs.filter { !matched.contains($0) }
+            diagLog.warning("captureWindowsImageSCK: SCK resolved \(scWindows.count)/\(windowIDs.count) requested windows; missing IDs: \(missing)")
+            return nil
+        }
+
+        // Union of selected window frames; used both as default bounds and
+        // to find the host display.
+        let unionBounds = scWindows.reduce(CGRect.null) { $0.union($1.frame) }
+        let effectiveBounds: CGRect = {
+            if let screenBounds, !screenBounds.isNull {
+                return screenBounds
+            }
+            return unionBounds
+        }()
+
+        // Pick the display that holds the largest share of unionBounds. A
+        // strict frame.contains check rejected status-item windows whose
+        // bounds overshoot NSScreen.frame.maxX by a handful of pixels
+        // (observed on the Clock and Thaw items: bounds = (1029, 0, 443, 33)
+        // on a 1470-wide display), so the SCK capture never happened and the
+        // icons disappeared from Settings / Search. Largest-intersection wins
+        // the common edge-overshoot case, picks the majority display for a
+        // cross-display span, and still returns nil when no display overlaps
+        // at all so truly orphan windows fall back / skip cleanly.
+        let displayCandidates = content.displays.compactMap { display -> (SCDisplay, CGFloat)? in
+            let intersection = display.frame.intersection(unionBounds)
+            guard !intersection.isNull else { return nil }
+            return (display, intersection.width * intersection.height)
+        }
+        guard let display = displayCandidates.max(by: { $0.1 < $1.1 })?.0 else {
+            diagLog.warning("captureWindowsImageSCK: no display intersects unionBounds=\(unionBounds) (effectiveBounds=\(effectiveBounds))")
+            return nil
+        }
+
+        let filter = SCContentFilter(display: display, including: scWindows)
+
+        let configuration = SCStreamConfiguration()
+        configuration.showsCursor = false
+        // boundsIgnoreFraming on the legacy API means "skip the window frame".
+        // For a display+including filter the equivalent is ignoreShadowsDisplay;
+        // no per-window shadow toggle exists on this filter shape. Empty
+        // options matches the legacy SkyLight default of keeping framing, so
+        // honor only the explicit flag here.
+        configuration.ignoreShadowsDisplay = options.contains(.boundsIgnoreFraming)
+
+        let scale: CGFloat = options.contains(.nominalResolution)
+            ? 1.0
+            : CGFloat(filter.pointPixelScale)
+
+        configuration.sourceRect = CGRect(
+            x: effectiveBounds.origin.x - display.frame.origin.x,
+            y: effectiveBounds.origin.y - display.frame.origin.y,
+            width: effectiveBounds.width,
+            height: effectiveBounds.height
+        )
+        configuration.width = Int((effectiveBounds.width * scale).rounded())
+        configuration.height = Int((effectiveBounds.height * scale).rounded())
+
+        do {
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            )
+            diagLog.debug("captureWindowsImageSCK: captured \(windowIDs.count) windows → \(image.width)×\(image.height)px")
+            return image
+        } catch {
+            diagLog.error("captureWindowsImageSCK: SCScreenshotManager.captureImage failed: \(error)")
+            return nil
+        }
+    }
+}
