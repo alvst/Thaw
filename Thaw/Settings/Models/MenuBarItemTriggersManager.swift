@@ -104,6 +104,17 @@ final class MenuBarItemTriggersManager: ObservableObject {
         scheduleEvaluation()
     }
 
+    /// The current aggregated system state (for live UI readouts).
+    var currentSystemState: SystemState {
+        systemMonitor.state
+    }
+
+    /// Whether the trigger's target item is currently placed in its reveal
+    /// section (i.e. the trigger last revealed it).
+    func isCurrentlyRevealed(_ trigger: MenuBarItemTrigger) -> Bool {
+        lastAppliedReveal[trigger.id] == true
+    }
+
     // MARK: - Mutation
 
     /// Adds a trigger.

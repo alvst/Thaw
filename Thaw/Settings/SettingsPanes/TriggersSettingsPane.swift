@@ -26,6 +26,36 @@ struct TriggerAppOption: Hashable {
     let name: String
 }
 
+/// The live status of a trigger, shown as a small badge in its row.
+enum TriggerLiveStatus {
+    /// The trigger is turned off.
+    case disabled
+    /// The trigger is on, but its condition's feature flag is off.
+    case inactive
+    /// The condition is currently met; the item is (being) revealed.
+    case revealing
+    /// The condition is not met; the item is (being) hidden.
+    case hidden
+
+    var label: String {
+        switch self {
+        case .disabled: "Off"
+        case .inactive: "Inactive"
+        case .revealing: "Revealing"
+        case .hidden: "Idle"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .disabled: .secondary
+        case .inactive: .orange
+        case .revealing: .green
+        case .hidden: .secondary
+        }
+    }
+}
+
 // MARK: - TriggersSettingsPane
 
 /// Settings pane for configuring conditional menu bar item triggers.
@@ -39,6 +69,11 @@ struct TriggersSettingsPane: View {
 
     @State private var itemOptions: [TriggerItemOption] = []
     @State private var appOptions: [TriggerAppOption] = []
+
+    /// Bumped on a timer to recompute the live status indicators.
+    @State private var liveTick = 0
+
+    private let liveTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     /// Composite key ("name-<id>" / "text-<id>") of the focused text field.
     @FocusState private var focusedField: String?
@@ -56,6 +91,7 @@ struct TriggersSettingsPane: View {
             if manager.triggers.isEmpty {
                 emptyState
             } else {
+                let conflicts = conflictingItemIdentifiers()
                 ForEach($manager.triggers) { $trigger in
                     TriggerRow(
                         trigger: $trigger,
@@ -64,6 +100,8 @@ struct TriggersSettingsPane: View {
                         availableKinds: availableKinds(currentKind: trigger.condition.kind),
                         invertEnabled: flags.isEnabled(.invertAction),
                         conditionActive: isConditionActive(trigger.condition.kind),
+                        liveStatus: liveStatus(for: trigger),
+                        hasConflict: !trigger.itemIdentifier.isEmpty && conflicts.contains(trigger.itemIdentifier),
                         currentCoordinate: { manager.systemMonitor.currentCoordinate },
                         focusedField: $focusedField,
                         onDelete: { manager.remove(id: trigger.id) }
@@ -82,6 +120,28 @@ struct TriggersSettingsPane: View {
         .onReceive(itemManager.$itemCache) { _ in
             refreshItemOptions()
         }
+        .onReceive(liveTimer) { _ in
+            liveTick &+= 1
+        }
+    }
+
+    // MARK: Live status
+
+    /// The current live status of a trigger, recomputed on the live timer.
+    private func liveStatus(for trigger: MenuBarItemTrigger) -> TriggerLiveStatus {
+        _ = liveTick // re-read on each tick
+        guard trigger.isEnabled else { return .disabled }
+        guard isConditionActive(trigger.condition.kind) else { return .inactive }
+        return trigger.shouldReveal(state: manager.currentSystemState) ? .revealing : .hidden
+    }
+
+    /// Item identifiers targeted by more than one enabled trigger.
+    private func conflictingItemIdentifiers() -> Set<String> {
+        var counts = [String: Int]()
+        for trigger in manager.triggers where trigger.isEnabled && !trigger.itemIdentifier.isEmpty {
+            counts[trigger.itemIdentifier, default: 0] += 1
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
     }
 
     // MARK: Available condition kinds
@@ -211,6 +271,8 @@ private struct TriggerRow: View {
     let availableKinds: [TriggerConditionKind]
     let invertEnabled: Bool
     let conditionActive: Bool
+    let liveStatus: TriggerLiveStatus
+    let hasConflict: Bool
     let currentCoordinate: () -> (latitude: Double, longitude: Double)?
     var focusedField: FocusState<String?>.Binding
     let onDelete: () -> Void
@@ -245,6 +307,9 @@ private struct TriggerRow: View {
                 if trigger.isEnabled, !conditionActive {
                     inactiveConditionWarning
                 }
+                if hasConflict {
+                    conflictWarning
+                }
                 sectionPickers
                 if invertEnabled {
                     Toggle("Hide the item while the condition is met (invert)", isOn: $trigger.invert)
@@ -267,6 +332,8 @@ private struct TriggerRow: View {
                 focusID: "name-\(trigger.id)"
             )
 
+            statusBadge
+
             Toggle("Enabled", isOn: $trigger.isEnabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
@@ -279,6 +346,19 @@ private struct TriggerRow: View {
             .buttonStyle(.borderless)
             .help("Delete this trigger")
         }
+    }
+
+    private var statusBadge: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(liveStatus.color)
+                .frame(width: 7, height: 7)
+            Text(liveStatus.label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .help("Live status of this trigger")
+        .fixedSize()
     }
 
     // MARK: Pickers
@@ -307,6 +387,18 @@ private struct TriggerRow: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text("This condition is turned off in Developer settings, so the trigger won't run.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var conflictWarning: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("Another enabled trigger also targets this item; they may fight over showing and hiding it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
