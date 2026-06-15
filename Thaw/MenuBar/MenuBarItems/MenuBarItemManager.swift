@@ -6816,6 +6816,86 @@ extension MenuBarItemManager {
         return true
     }
 
+    // MARK: - Trigger-Driven Item Visibility
+
+    /// Moves the menu bar item identified by the given stable tag identifier
+    /// into the given section, if the item is present and not already there.
+    ///
+    /// Used by the menu bar item triggers system to reveal or hide an
+    /// individual item when its trigger condition changes. The saved
+    /// section order naturally follows the move on the next cache cycle
+    /// (the move cooldown defers `applySavedLayout` long enough for the
+    /// cache to persist the new placement), so no special-casing of the
+    /// reconciler is required.
+    ///
+    /// - Returns: `true` when a move was performed; `false` for any no-op
+    ///   (item missing, immovable, non-hideable, or already in `section`).
+    @discardableResult
+    func moveItem(withTagIdentifier tagIdentifier: String, toSection section: MenuBarSection.Name) async -> Bool {
+        guard let appState else { return false }
+
+        var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+
+        // Resolve the target before ControlItemPair consumes the control
+        // items from the list. Control items are never trigger targets.
+        guard let target = items.first(where: { $0.tag.tagIdentifier == tagIdentifier }) else {
+            MenuBarItemManager.diagLog.debug("moveItem(trigger): no item matches identifier \(tagIdentifier)")
+            return false
+        }
+        guard target.isMovable else {
+            MenuBarItemManager.diagLog.debug("moveItem(trigger): \(target.logString) is not movable")
+            return false
+        }
+        // Items destined for a hidden section must actually be hideable.
+        if section != .visible, !target.canBeHidden {
+            MenuBarItemManager.diagLog.debug("moveItem(trigger): \(target.logString) cannot be hidden")
+            return false
+        }
+
+        let hiddenControlItemWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .hidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        let alwaysHiddenControlItemWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .alwaysHidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+
+        guard let controlItems = ControlItemPair(
+            items: &items,
+            hiddenControlItemWindowID: hiddenControlItemWID,
+            alwaysHiddenControlItemWindowID: alwaysHiddenControlItemWID
+        ) else {
+            MenuBarItemManager.diagLog.warning("moveItem(trigger): missing control items; cannot move \(target.logString)")
+            return false
+        }
+
+        // Skip when the item already resides in the target section.
+        let displayID = Bridging.getActiveMenuBarDisplayID()
+        var context = CacheContext(controlItems: controlItems, displayID: displayID)
+        if context.findSection(for: target) == section {
+            return false
+        }
+
+        // Fall back to the hidden section when always-hidden is requested
+        // but unavailable (section disabled or no control item present).
+        var resolvedSection = section
+        if resolvedSection == .alwaysHidden,
+           controlItems.alwaysHidden == nil || appState.settings.advanced.enableAlwaysHiddenSection == false
+        {
+            resolvedSection = .hidden
+        }
+
+        let destination = LayoutReconciler.boundaryDestination(for: resolvedSection, controlItems: controlItems)
+
+        do {
+            try await move(item: target, to: destination, on: displayID)
+            MenuBarItemManager.diagLog.info("moveItem(trigger): moved \(target.logString) to \(resolvedSection.logString)")
+            return true
+        } catch {
+            MenuBarItemManager.diagLog.error("moveItem(trigger): failed to move \(target.logString): \(error)")
+            return false
+        }
+    }
+
     /// Restores items that are stuck in a "blocked" state (positioned at x=-1)
     /// back to the visible section. This is called when the app is terminating
     /// to prevent items from being permanently stuck in macOS's Control Center preferences.

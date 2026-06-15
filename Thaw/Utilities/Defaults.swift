@@ -311,6 +311,10 @@ extension Defaults {
         case globalPreProfileHook = "GlobalPreProfileHook"
         case globalPostProfileHook = "GlobalPostProfileHook"
 
+        // MARK: Menu Bar Item Triggers
+
+        case menuBarItemTriggers = "MenuBarItemTriggers"
+
         // MARK: Deprecated (Appearance Settings)
 
         case menuBarHasBorder = "MenuBarHasBorder"
