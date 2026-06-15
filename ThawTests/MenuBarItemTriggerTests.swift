@@ -117,6 +117,47 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertFalse(TriggerCondition.focusActive.isSatisfied(state: state(focus: false)))
     }
 
+    // MARK: - Location
+
+    private func locatedState(lat: Double, lon: Double) -> SystemState {
+        var s = state()
+        s.currentLatitude = lat
+        s.currentLongitude = lon
+        return s
+    }
+
+    func testNearLocationWithinRadius() {
+        // ~11m north of the target — inside a 150m radius.
+        let condition = TriggerCondition.nearLocation(
+            latitude: 37.3349, longitude: -122.0090, radiusMeters: 150, label: "Work"
+        )
+        XCTAssertTrue(condition.isSatisfied(state: locatedState(lat: 37.3350, lon: -122.0090)))
+    }
+
+    func testNearLocationOutsideRadius() {
+        // Cupertino target vs San Francisco current — far outside any radius.
+        let condition = TriggerCondition.nearLocation(
+            latitude: 37.3349, longitude: -122.0090, radiusMeters: 150, label: "Work"
+        )
+        XCTAssertFalse(condition.isSatisfied(state: locatedState(lat: 37.7749, lon: -122.4194)))
+    }
+
+    func testNearLocationWithoutFixIsFalse() {
+        let condition = TriggerCondition.nearLocation(
+            latitude: 37.3349, longitude: -122.0090, radiusMeters: 150, label: "Work"
+        )
+        XCTAssertFalse(condition.isSatisfied(state: state()))
+    }
+
+    func testWithLocationUpdatesFields() {
+        let base = TriggerCondition.nearLocation(latitude: 0, longitude: 0, radiusMeters: 150, label: "")
+        let updated = base.withLocation(latitude: 1, longitude: 2, radiusMeters: 300, label: "Home")
+        XCTAssertEqual(updated.locationValue?.latitude, 1)
+        XCTAssertEqual(updated.locationValue?.longitude, 2)
+        XCTAssertEqual(updated.locationValue?.radiusMeters, 300)
+        XCTAssertEqual(updated.locationValue?.label, "Home")
+    }
+
     // MARK: - Schedule
 
     private func date(hour: Int, minute: Int) -> Date {

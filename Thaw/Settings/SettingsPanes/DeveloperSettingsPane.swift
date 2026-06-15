@@ -128,6 +128,7 @@ struct DeveloperSettingsPane: View {
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
                 stateRow("Focus active", state.isFocusActive ? "Yes" : "No")
                 stateRow("Focus mode", state.activeFocusModeName ?? "—")
+                stateRow("Location", locationValue())
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -149,6 +150,22 @@ struct DeveloperSettingsPane: View {
     private func batteryString(_ power: PowerState) -> String {
         guard let percentage = power.batteryPercentage else { return "No battery" }
         return "\(Int(percentage.rounded()))%"
+    }
+
+    /// Current coordinate when the Location flag is on, otherwise a hint.
+    private func locationValue() -> String {
+        guard flags.isEnabled(.location) else { return "Enable flag to read" }
+        if let coordinate = systemMonitor.currentCoordinate {
+            return String(format: "%.4f, %.4f", coordinate.latitude, coordinate.longitude)
+        }
+        switch systemMonitor.locationAuthorizationStatus {
+        case .notDetermined:
+            return "Awaiting Location permission…"
+        case .denied, .restricted:
+            return "Location denied — enable in System Settings"
+        default:
+            return "Locating…"
+        }
     }
 
     /// Wi-Fi SSID value or, when unavailable, the reason — usually the

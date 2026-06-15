@@ -7,6 +7,7 @@
 //  Licensed under the GNU GPLv3
 
 import AppKit
+import CoreLocation
 import Foundation
 
 // MARK: - TriggerCondition
@@ -43,6 +44,9 @@ enum TriggerCondition: Codable, Hashable {
     case schedule(startMinutes: Int, endMinutes: Int)
     case focusActive
     case focusMode(name: String)
+
+    // Location
+    case nearLocation(latitude: Double, longitude: Double, radiusMeters: Double, label: String)
 
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
@@ -85,6 +89,17 @@ enum TriggerCondition: Codable, Hashable {
         case let .focusMode(name):
             return !name.isEmpty
                 && state.activeFocusModeName?.caseInsensitiveCompare(name) == .orderedSame
+        case let .nearLocation(latitude, longitude, radiusMeters, _):
+            guard
+                let currentLat = state.currentLatitude,
+                let currentLon = state.currentLongitude,
+                radiusMeters > 0
+            else {
+                return false
+            }
+            let here = CLLocation(latitude: currentLat, longitude: currentLon)
+            let target = CLLocation(latitude: latitude, longitude: longitude)
+            return here.distance(from: target) <= radiusMeters
         }
     }
 
@@ -124,6 +139,9 @@ enum TriggerCondition: Codable, Hashable {
             return "A Focus is active"
         case let .focusMode(name):
             return name.isEmpty ? "A Focus mode is active" : "Focus mode is “\(name)”"
+        case let .nearLocation(_, _, radiusMeters, label):
+            let place = label.isEmpty ? "a saved location" : "“\(label)”"
+            return "Within \(Int(radiusMeters))m of \(place)"
         }
     }
 
@@ -182,6 +200,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case schedule
     case focusActive
     case focusModeNamed
+    case nearLocation
 
     var id: String { rawValue }
 
@@ -204,6 +223,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .schedule: "During time window"
         case .focusActive: "Any Focus is active"
         case .focusModeNamed: "Focus mode is"
+        case .nearLocation: "Near a location"
         }
     }
 
@@ -234,6 +254,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .audioOutput: .text(prompt: "Device name contains")
         case .focusModeNamed: .text(prompt: "Focus mode name (e.g. Work)")
         case .schedule: .timeRange
+        case .nearLocation: .location
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive:
             .none
@@ -257,6 +278,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .schedule: .schedule
         case .focusActive: .focusMode
         case .focusModeNamed: .focusMode
+        case .nearLocation: .location
         }
     }
 }
@@ -268,6 +290,7 @@ enum TriggerConditionEditor: Equatable {
     case appPicker
     case text(prompt: String)
     case timeRange
+    case location
 }
 
 // MARK: - TriggerCondition <-> Kind
@@ -292,6 +315,7 @@ extension TriggerCondition {
         case .schedule: .schedule
         case .focusActive: .focusActive
         case .focusMode: .focusModeNamed
+        case .nearLocation: .nearLocation
         }
     }
 
@@ -327,6 +351,16 @@ extension TriggerCondition {
         }
     }
 
+    /// The saved location, for the location condition.
+    var locationValue: (latitude: Double, longitude: Double, radiusMeters: Double, label: String)? {
+        switch self {
+        case let .nearLocation(latitude, longitude, radiusMeters, label):
+            (latitude, longitude, radiusMeters, label)
+        default:
+            nil
+        }
+    }
+
     /// Builds the default condition for the given kind.
     static func defaultCondition(for kind: TriggerConditionKind) -> TriggerCondition {
         switch kind {
@@ -346,6 +380,7 @@ extension TriggerCondition {
         case .schedule: .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
         case .focusActive: .focusActive
         case .focusModeNamed: .focusMode(name: "")
+        case .nearLocation: .nearLocation(latitude: 0, longitude: 0, radiusMeters: 150, label: "")
         }
     }
 
@@ -365,7 +400,7 @@ extension TriggerCondition {
             old.scheduleWindow.map { TriggerCondition.schedule(startMinutes: $0.start, endMinutes: $0.end) }
                 ?? .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive:
+             .vpnActive, .externalDisplay, .focusActive, .nearLocation:
             defaultCondition(for: kind)
         }
     }
@@ -405,6 +440,22 @@ extension TriggerCondition {
         case .schedule: .schedule(startMinutes: start, endMinutes: end)
         default: self
         }
+    }
+
+    /// Returns a copy of the location condition with selected fields replaced.
+    func withLocation(
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        radiusMeters: Double? = nil,
+        label: String? = nil
+    ) -> TriggerCondition {
+        guard case let .nearLocation(lat, lon, radius, currentLabel) = self else { return self }
+        return .nearLocation(
+            latitude: latitude ?? lat,
+            longitude: longitude ?? lon,
+            radiusMeters: radiusMeters ?? radius,
+            label: label ?? currentLabel
+        )
     }
 }
 

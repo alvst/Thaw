@@ -61,6 +61,10 @@ struct SystemState: Equatable {
     /// or `nil` when no Thaw Focus Filter is currently applied.
     var activeFocusModeName: String?
 
+    /// The current latitude / longitude, when location updates are running.
+    var currentLatitude: Double?
+    var currentLongitude: Double?
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -73,7 +77,9 @@ struct SystemState: Equatable {
         screenCount: Int = 1,
         externalDisplayConnected: Bool = false,
         isFocusActive: Bool = false,
-        activeFocusModeName: String? = nil
+        activeFocusModeName: String? = nil,
+        currentLatitude: Double? = nil,
+        currentLongitude: Double? = nil
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -87,6 +93,8 @@ struct SystemState: Equatable {
         self.externalDisplayConnected = externalDisplayConnected
         self.isFocusActive = isFocusActive
         self.activeFocusModeName = activeFocusModeName
+        self.currentLatitude = currentLatitude
+        self.currentLongitude = currentLongitude
     }
 }
 
@@ -119,10 +127,10 @@ final class SystemStateMonitor: ObservableObject {
     // Poll timer for the sampled sources.
     private var pollTimer: Timer?
 
-    // Reading the Wi-Fi SSID requires Location authorization on modern
-    // macOS; this manager is created lazily to prompt the user only when
-    // the Wi-Fi SSID feature is enabled.
-    private var locationManager: CLLocationManager?
+    // Provides Location authorization (needed for Wi-Fi SSID) and the
+    // current coordinate (needed for the location condition). Created lazily
+    // so the prompt only appears when a location-using feature is enabled.
+    private var locationProvider: LocationProvider?
 
     private let diagLog = DiagLog(category: "SystemStateMonitor")
 
@@ -167,8 +175,15 @@ final class SystemStateMonitor: ObservableObject {
         setDisplayMonitoring(flags.isEnabled(.display))
         setNetworkMonitoring(flags.isEnabled(.network) || flags.isEnabled(.vpn))
 
-        if flags.isEnabled(.wifiSSID) {
+        // Both Wi-Fi SSID and the location condition need Location access.
+        if flags.isEnabled(.wifiSSID) || flags.isEnabled(.location) {
             ensureLocationAuthorization()
+        }
+        // The location condition additionally needs live coordinate updates.
+        if flags.isEnabled(.location) {
+            locationProvider?.startUpdating()
+        } else {
+            locationProvider?.stopUpdating()
         }
         if flags.isEnabled(.focusMode) {
             ensureFocusAuthorization()
@@ -179,6 +194,7 @@ final class SystemStateMonitor: ObservableObject {
             || flags.isEnabled(.vpn)
             || flags.isEnabled(.wifiSSID)
             || flags.isEnabled(.focusMode)
+            || flags.isEnabled(.location)
         setPolling(needsPoll)
 
         // Run one immediate sample so newly enabled sources populate now.
@@ -283,21 +299,27 @@ final class SystemStateMonitor: ObservableObject {
 
     // MARK: Location (for Wi-Fi SSID)
 
-    /// Requests Location authorization the first time the Wi-Fi SSID feature
-    /// is enabled. Without it, `CWWiFiClient.ssid()` returns `nil` on modern
-    /// macOS even though the API call succeeds.
+    /// Requests Location authorization for reading the Wi-Fi SSID, creating
+    /// the authorizer on first use. Without authorization,
+    /// `CWWiFiClient.ssid()` returns `nil` on modern macOS even though the
+    /// call succeeds. The authorizer sets a delegate, which is required for
+    /// the system prompt to actually appear.
     func ensureLocationAuthorization() {
-        let manager = locationManager ?? CLLocationManager()
-        locationManager = manager
-        if manager.authorizationStatus == .notDetermined {
-            manager.requestWhenInUseAuthorization()
-        }
+        let provider = locationProvider ?? LocationProvider()
+        locationProvider = provider
+        provider.requestIfNeeded()
     }
 
     /// The current Location authorization status (used by the Developer pane
-    /// to explain why the Wi-Fi SSID is unavailable).
+    /// to explain why the Wi-Fi SSID / location is unavailable).
     var locationAuthorizationStatus: CLAuthorizationStatus {
-        (locationManager ?? CLLocationManager()).authorizationStatus
+        locationProvider?.status ?? CLLocationManager().authorizationStatus
+    }
+
+    /// The most recent coordinate, if location updates are running.
+    var currentCoordinate: (latitude: Double, longitude: Double)? {
+        guard let coordinate = locationProvider?.currentLocation?.coordinate else { return nil }
+        return (coordinate.latitude, coordinate.longitude)
     }
 
     /// Requests Focus authorization the first time the Focus feature is
@@ -354,6 +376,7 @@ final class SystemStateMonitor: ObservableObject {
         // which the filter itself sets on activation and clears on
         // deactivation (see ThawFocusModeStore).
         let focusMode = flags.isEnabled(.focusMode) ? ThawFocusModeStore.activeMode : nil
+        let coordinate = flags.isEnabled(.location) ? currentCoordinate : nil
 
         update {
             if flags.isEnabled(.audioOutput) { $0.audioOutputDeviceName = audio }
@@ -363,6 +386,10 @@ final class SystemStateMonitor: ObservableObject {
             if flags.isEnabled(.focusMode) {
                 $0.isFocusActive = focus
                 $0.activeFocusModeName = focusMode
+            }
+            if flags.isEnabled(.location) {
+                $0.currentLatitude = coordinate?.latitude
+                $0.currentLongitude = coordinate?.longitude
             }
         }
     }
@@ -511,5 +538,63 @@ final class SystemStateMonitor: ObservableObject {
             return false
         }
         return !assertions.isEmpty
+    }
+}
+
+// MARK: - LocationProvider
+
+/// Owns a `CLLocationManager` to supply Location authorization (required by
+/// CoreWLAN to read the Wi-Fi SSID) and, when started, the current
+/// coordinate (for the location trigger condition).
+///
+/// A delegate is set in `init` — this is required for the authorization
+/// prompt to appear reliably. The manager is created on the main thread, so
+/// its delegate callbacks arrive on the main run loop and `currentLocation`
+/// is only ever touched there.
+private final class LocationProvider: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private(set) var currentLocation: CLLocation?
+    private var isUpdating = false
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    var status: CLAuthorizationStatus { manager.authorizationStatus }
+
+    func requestIfNeeded() {
+        if manager.authorizationStatus == .notDetermined {
+            manager.requestWhenInUseAuthorization()
+        }
+    }
+
+    func startUpdating() {
+        guard !isUpdating else { return }
+        isUpdating = true
+        manager.startUpdatingLocation()
+    }
+
+    func stopUpdating() {
+        guard isUpdating else { return }
+        isUpdating = false
+        manager.stopUpdatingLocation()
+        currentLocation = nil
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        currentLocation = locations.last
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        if isUpdating, status == .authorized || status == .authorizedAlways {
+            manager.startUpdatingLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // Ignore transient errors; the next update refreshes the location.
     }
 }

@@ -30,6 +30,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     case display
     case schedule
     case focusMode
+    case location
     case invertAction
 
     var id: String { rawValue }
@@ -47,6 +48,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .display: "External display"
         case .schedule: "Time schedule"
         case .focusMode: "Focus / Do Not Disturb"
+        case .location: "Location"
         case .invertAction: "Invert action (hide when met)"
         }
     }
@@ -64,6 +66,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .display: "Reveal an item while an external display is connected."
         case .schedule: "Reveal an item during a time-of-day window."
         case .focusMode: "Reveal an item while a macOS Focus is active."
+        case .location: "Reveal an item while you're near a saved place (uses Location)."
         case .invertAction: "Allow triggers to hide (instead of reveal) when the condition is met."
         }
     }
@@ -72,7 +75,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     /// may not work reliably on all systems.
     var isExperimental: Bool {
         switch self {
-        case .wifiSSID, .focusMode: true
+        case .wifiSSID, .focusMode, .location: true
         default: false
         }
     }

@@ -64,6 +64,7 @@ struct TriggersSettingsPane: View {
                         availableKinds: availableKinds(currentKind: trigger.condition.kind),
                         invertEnabled: flags.isEnabled(.invertAction),
                         conditionActive: isConditionActive(trigger.condition.kind),
+                        currentCoordinate: { manager.systemMonitor.currentCoordinate },
                         focusedField: $focusedField,
                         onDelete: { manager.remove(id: trigger.id) }
                     )
@@ -210,6 +211,7 @@ private struct TriggerRow: View {
     let availableKinds: [TriggerConditionKind]
     let invertEnabled: Bool
     let conditionActive: Bool
+    let currentCoordinate: () -> (latitude: Double, longitude: Double)?
     var focusedField: FocusState<String?>.Binding
     let onDelete: () -> Void
 
@@ -329,6 +331,8 @@ private struct TriggerRow: View {
             )
         case .timeRange:
             timeRangeEditor
+        case .location:
+            locationEditor
         case .none:
             EmptyView()
         }
@@ -392,7 +396,84 @@ private struct TriggerRow: View {
         }
     }
 
+    @ViewBuilder
+    private var locationEditor: some View {
+        let location = trigger.condition.locationValue ?? (latitude: 0, longitude: 0, radiusMeters: 150, label: "")
+        let coordinate = currentCoordinate()
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Use Current Location") {
+                    if let coordinate {
+                        trigger.condition = trigger.condition.withLocation(
+                            latitude: coordinate.latitude,
+                            longitude: coordinate.longitude
+                        )
+                    }
+                }
+                .disabled(coordinate == nil)
+
+                Spacer()
+
+                if location.latitude != 0 || location.longitude != 0 {
+                    Text(verbatim: String(format: "%.4f, %.4f", location.latitude, location.longitude))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Text("No location captured")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            IcePicker("Radius", selection: radiusBinding) {
+                ForEach(Self.radiusPresets(including: location.radiusMeters), id: \.self) { meters in
+                    Text("\(Int(meters)) m").tag(meters)
+                }
+            }
+
+            CommitTextField(
+                title: "Label (e.g. Home)",
+                prompt: "Label",
+                value: locationLabelBinding,
+                focusedField: focusedField,
+                focusID: "loclabel-\(trigger.id)"
+            )
+
+            if coordinate == nil {
+                Text("Turn on the Location flag in Developer settings and grant permission to capture your current location.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private static func radiusPresets(including current: Double) -> [Double] {
+        var presets: [Double] = [50, 100, 150, 300, 500, 1000]
+        if !presets.contains(current) {
+            presets.append(current)
+            presets.sort()
+        }
+        return presets
+    }
+
     // MARK: Bindings
+
+    private var radiusBinding: Binding<Double> {
+        Binding(
+            get: { trigger.condition.locationValue?.radiusMeters ?? 150 },
+            set: { trigger.condition = trigger.condition.withLocation(radiusMeters: $0) }
+        )
+    }
+
+    private var locationLabelBinding: Binding<String> {
+        Binding(
+            get: { trigger.condition.locationValue?.label ?? "" },
+            set: { trigger.condition = trigger.condition.withLocation(label: $0) }
+        )
+    }
 
     private var itemBinding: Binding<String> {
         Binding(
