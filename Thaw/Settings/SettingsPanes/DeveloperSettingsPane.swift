@@ -15,11 +15,16 @@ import SwiftUI
 /// source can be enabled and debugged in isolation.
 struct DeveloperSettingsPane: View {
     @ObservedObject private var flags: TriggerFeatureFlagsManager
-    @ObservedObject private var systemMonitor: SystemStateMonitor
+
+    /// A direct, flag-independent snapshot of the system, refreshed on a
+    /// timer while the pane is visible so the readout always shows ground
+    /// truth (the trigger monitors themselves remain gated by the flags).
+    @State private var liveState = SystemState()
+
+    private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     init(manager: MenuBarItemTriggersManager) {
         flags = manager.featureFlags
-        systemMonitor = manager.systemMonitor
     }
 
     var body: some View {
@@ -27,6 +32,10 @@ struct DeveloperSettingsPane: View {
             introSection
             flagsSection
             liveStateSection
+        }
+        .onAppear { liveState = SystemStateMonitor.fullSnapshot() }
+        .onReceive(refreshTimer) { _ in
+            liveState = SystemStateMonitor.fullSnapshot()
         }
     }
 
@@ -92,7 +101,7 @@ struct DeveloperSettingsPane: View {
     private var liveStateSection: some View {
         IceSection("Live System State", options: [.isBordered]) {
             VStack(alignment: .leading, spacing: 6) {
-                let state = systemMonitor.state
+                let state = liveState
                 stateRow("Battery", batteryString(state.power))
                 stateRow("Power source", state.power.isOnACPower ? "AC power" : "Battery")
                 stateRow("Charging", state.power.isCharging ? "Yes" : "No")

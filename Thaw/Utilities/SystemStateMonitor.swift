@@ -13,6 +13,7 @@ import CoreWLAN
 import Foundation
 import IOBluetooth
 import Network
+import SystemConfiguration
 
 // MARK: - SystemState
 
@@ -312,7 +313,50 @@ final class SystemStateMonitor: ObservableObject {
         }
     }
 
+    /// Samples every source directly, ignoring feature flags. Used by the
+    /// Developer pane so its live readout always reflects ground truth.
+    @MainActor
+    static func fullSnapshot() -> SystemState {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let running = Set(
+            NSWorkspace.shared.runningApplications
+                .filter { $0.activationPolicy == .regular }
+                .compactMap(\.bundleIdentifier)
+        )
+        return SystemState(
+            power: PowerSourceMonitor.readCurrentState(),
+            frontmostAppBundleID: frontmost,
+            runningAppBundleIDs: running,
+            isNetworkConnected: isNetworkReachable(),
+            isVPNActive: isVPNActive(),
+            wifiSSID: currentWiFiSSID(),
+            connectedBluetoothDeviceNames: connectedBluetoothDeviceNames(),
+            audioOutputDeviceName: defaultAudioOutputDeviceName(),
+            screenCount: NSScreen.screens.count,
+            externalDisplayConnected: hasExternalDisplay(),
+            isFocusActive: isFocusActive()
+        )
+    }
+
     // MARK: Sampling helpers
+
+    /// Synchronously checks general internet reachability (used by the
+    /// Developer snapshot; live monitoring uses NWPathMonitor instead).
+    static func isNetworkReachable() -> Bool {
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        guard let reachability = withUnsafePointer(to: &address, { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                SCNetworkReachabilityCreateWithAddress(nil, $0)
+            }
+        }) else {
+            return false
+        }
+        var flags = SCNetworkReachabilityFlags()
+        guard SCNetworkReachabilityGetFlags(reachability, &flags) else { return false }
+        return flags.contains(.reachable) && !flags.contains(.connectionRequired)
+    }
 
     /// Returns the name of the current default audio output device.
     static func defaultAudioOutputDeviceName() -> String? {
