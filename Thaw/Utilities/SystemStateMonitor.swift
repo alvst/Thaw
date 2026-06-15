@@ -517,7 +517,12 @@ final class SystemStateMonitor: ObservableObject {
     /// the Do Not Disturb assertions store when the status is unavailable
     /// (e.g. authorization not yet granted).
     static func isFocusActive() -> Bool {
-        if let focused = INFocusStatusCenter.default.focusStatus.isFocused {
+        // Only touch focusStatus when authorized: reading protected data
+        // without authorization (and without the usage description) risks a
+        // privacy abort, and returns nil anyway. Fall back to the file.
+        if INFocusStatusCenter.default.authorizationStatus == .authorized,
+           let focused = INFocusStatusCenter.default.focusStatus.isFocused
+        {
             return focused
         }
         return isFocusActiveFromAssertions()
