@@ -286,12 +286,18 @@ final class SystemStateMonitor: ObservableObject {
     /// Requests Location authorization the first time the Wi-Fi SSID feature
     /// is enabled. Without it, `CWWiFiClient.ssid()` returns `nil` on modern
     /// macOS even though the API call succeeds.
-    private func ensureLocationAuthorization() {
+    func ensureLocationAuthorization() {
         let manager = locationManager ?? CLLocationManager()
         locationManager = manager
         if manager.authorizationStatus == .notDetermined {
             manager.requestWhenInUseAuthorization()
         }
+    }
+
+    /// The current Location authorization status (used by the Developer pane
+    /// to explain why the Wi-Fi SSID is unavailable).
+    var locationAuthorizationStatus: CLAuthorizationStatus {
+        (locationManager ?? CLLocationManager()).authorizationStatus
     }
 
     /// Requests Focus authorization the first time the Focus feature is

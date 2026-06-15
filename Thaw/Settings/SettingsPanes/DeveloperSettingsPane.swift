@@ -6,6 +6,7 @@
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
+import CoreLocation
 import SwiftUI
 
 // MARK: - DeveloperSettingsPane
@@ -16,6 +17,10 @@ import SwiftUI
 struct DeveloperSettingsPane: View {
     @ObservedObject private var flags: TriggerFeatureFlagsManager
 
+    // Plain reference (not observed): used to read Location authorization
+    // status and to (re)request it for the Wi-Fi SSID diagnostic.
+    private let systemMonitor: SystemStateMonitor
+
     /// A direct, flag-independent snapshot of the system, refreshed on a
     /// timer while the pane is visible so the readout always shows ground
     /// truth (the trigger monitors themselves remain gated by the flags).
@@ -25,6 +30,7 @@ struct DeveloperSettingsPane: View {
 
     init(manager: MenuBarItemTriggersManager) {
         flags = manager.featureFlags
+        systemMonitor = manager.systemMonitor
     }
 
     var body: some View {
@@ -33,7 +39,14 @@ struct DeveloperSettingsPane: View {
             flagsSection
             liveStateSection
         }
-        .onAppear { liveState = SystemStateMonitor.fullSnapshot(flags: flags) }
+        .onAppear {
+            liveState = SystemStateMonitor.fullSnapshot(flags: flags)
+            // While the window is focused, nudge the Location prompt so the
+            // Wi-Fi SSID can resolve (no-op once decided).
+            if flags.isEnabled(.wifiSSID) {
+                systemMonitor.ensureLocationAuthorization()
+            }
+        }
         .onReceive(refreshTimer) { _ in
             liveState = SystemStateMonitor.fullSnapshot(flags: flags)
         }
@@ -109,7 +122,7 @@ struct DeveloperSettingsPane: View {
                 stateRow("Running apps", "\(state.runningAppBundleIDs.count)")
                 stateRow("Network", state.isNetworkConnected ? "Connected" : "Offline")
                 stateRow("VPN", state.isVPNActive ? "Active" : "Inactive")
-                stateRow("Wi-Fi SSID", flags.isEnabled(.wifiSSID) ? (state.wifiSSID ?? "—") : "Enable flag to read")
+                stateRow("Wi-Fi SSID", wifiSSIDValue(state))
                 stateRow("Bluetooth", flags.isEnabled(.bluetooth) ? state.connectedBluetoothDeviceNames.sorted().joined(separator: ", ").orDash : "Enable flag to read")
                 stateRow("Audio output", state.audioOutputDeviceName ?? "—")
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
@@ -136,6 +149,23 @@ struct DeveloperSettingsPane: View {
     private func batteryString(_ power: PowerState) -> String {
         guard let percentage = power.batteryPercentage else { return "No battery" }
         return "\(Int(percentage.rounded()))%"
+    }
+
+    /// Wi-Fi SSID value or, when unavailable, the reason — usually the
+    /// Location authorization state, since CoreWLAN needs it to read SSIDs.
+    private func wifiSSIDValue(_ state: SystemState) -> String {
+        guard flags.isEnabled(.wifiSSID) else { return "Enable flag to read" }
+        if let ssid = state.wifiSSID, !ssid.isEmpty { return ssid }
+        switch systemMonitor.locationAuthorizationStatus {
+        case .notDetermined:
+            return "Awaiting Location permission…"
+        case .denied, .restricted:
+            return "Location denied — enable in System Settings ▸ Privacy & Security ▸ Location Services"
+        case .authorized, .authorizedAlways:
+            return "No Wi-Fi network (or Wi-Fi off)"
+        @unknown default:
+            return "Unavailable"
+        }
     }
 }
 
