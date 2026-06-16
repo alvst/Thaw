@@ -101,6 +101,7 @@ struct TriggersSettingsPane: View {
                         enabledKinds: kinds,
                         compoundEnabled: flags.isEnabled(.compoundConditions),
                         invertEnabled: flags.isEnabled(.invertAction),
+                        advancedEnabled: flags.isEnabled(.advancedOptions),
                         conditionActive: allConditionsActive(trigger),
                         liveStatus: liveStatus(for: trigger),
                         hasConflict: !trigger.itemIdentifier.isEmpty && conflicts.contains(trigger.itemIdentifier),
@@ -276,6 +277,7 @@ private struct TriggerRow: View {
     let enabledKinds: [TriggerConditionKind]
     let compoundEnabled: Bool
     let invertEnabled: Bool
+    let advancedEnabled: Bool
     let conditionActive: Bool
     let liveStatus: TriggerLiveStatus
     let hasConflict: Bool
@@ -320,6 +322,9 @@ private struct TriggerRow: View {
                     Toggle("Hide the item while the condition is met (invert)", isOn: $trigger.invert)
                         .toggleStyle(.switch)
                 }
+                if advancedEnabled {
+                    advancedOptions
+                }
             }
             .padding(8)
         }
@@ -351,6 +356,39 @@ private struct TriggerRow: View {
             .buttonStyle(.borderless)
             .help("Delete this trigger")
         }
+    }
+
+    private var advancedOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            Toggle("Notify when this reveals the item", isOn: $trigger.notifyOnReveal)
+                .toggleStyle(.switch)
+            HStack(spacing: 12) {
+                Toggle("Custom delay", isOn: delayEnabledBinding)
+                    .toggleStyle(.switch)
+                if trigger.settleSecondsOverride != nil {
+                    Stepper(value: delaySecondsBinding, in: 0 ... 120, step: 1) {
+                        Text(verbatim: "\(Int(delaySecondsBinding.wrappedValue)) s")
+                            .monospacedDigit()
+                    }
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    private var delayEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { trigger.settleSecondsOverride != nil },
+            set: { trigger.settleSecondsOverride = $0 ? (trigger.settleSecondsOverride ?? 2) : nil }
+        )
+    }
+
+    private var delaySecondsBinding: Binding<Double> {
+        Binding(
+            get: { trigger.settleSecondsOverride ?? 2 },
+            set: { trigger.settleSecondsOverride = $0 }
+        )
     }
 
     private var statusBadge: some View {

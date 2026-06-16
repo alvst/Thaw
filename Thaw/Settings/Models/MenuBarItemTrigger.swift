@@ -642,6 +642,13 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
     /// are satisfied. Gated by the `invertAction` feature flag in the UI.
     var invert: Bool
 
+    /// When `true`, posts a notification when this trigger reveals its item.
+    var notifyOnReveal: Bool
+
+    /// Overrides the debounce settle (seconds) before a flip is applied.
+    /// `nil` uses the per-condition default.
+    var settleSecondsOverride: Double?
+
     init(
         id: UUID = UUID(),
         name: String = "",
@@ -653,7 +660,9 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         condition: TriggerCondition = .batteryBelow(percentage: 20),
         additionalConditions: [TriggerCondition] = [],
         combinator: TriggerCombinator = .all,
-        invert: Bool = false
+        invert: Bool = false,
+        notifyOnReveal: Bool = false,
+        settleSecondsOverride: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -666,12 +675,15 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         self.additionalConditions = additionalConditions
         self.combinator = combinator
         self.invert = invert
+        self.notifyOnReveal = notifyOnReveal
+        self.settleSecondsOverride = settleSecondsOverride
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, isEnabled, itemIdentifier, itemDisplayName
         case revealSection, hideSection, condition, invert
         case additionalConditions, combinator
+        case notifyOnReveal, settleSecondsOverride
     }
 
     /// Forward-compatible decoding: `invert`, `additionalConditions`, and
@@ -690,6 +702,8 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         additionalConditions = try container.decodeIfPresent([TriggerCondition].self, forKey: .additionalConditions) ?? []
         combinator = try container.decodeIfPresent(TriggerCombinator.self, forKey: .combinator) ?? .all
         invert = try container.decodeIfPresent(Bool.self, forKey: .invert) ?? false
+        notifyOnReveal = try container.decodeIfPresent(Bool.self, forKey: .notifyOnReveal) ?? false
+        settleSecondsOverride = try container.decodeIfPresent(Double.self, forKey: .settleSecondsOverride)
     }
 
     /// All conditions, primary first.

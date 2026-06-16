@@ -36,6 +36,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     case recordingDevices
     case scriptResult
     case compoundConditions
+    case advancedOptions
     case invertAction
 
     var id: String { rawValue }
@@ -59,6 +60,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .recordingDevices: "Camera / microphone in use"
         case .scriptResult: "Script result"
         case .compoundConditions: "Combine conditions (AND / OR)"
+        case .advancedOptions: "Advanced per-trigger options"
         case .invertAction: "Invert action (hide when met)"
         }
     }
@@ -82,6 +84,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .recordingDevices: "Reveal an item while the camera or microphone is in use."
         case .scriptResult: "Reveal an item based on a script's exit code or output (runs your script periodically)."
         case .compoundConditions: "Let a trigger combine several conditions with AND / OR."
+        case .advancedOptions: "Show per-trigger options: a notification when it reveals and a custom delay."
         case .invertAction: "Allow triggers to hide (instead of reveal) when the condition is met."
         }
     }

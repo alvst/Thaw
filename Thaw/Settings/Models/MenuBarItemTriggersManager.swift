@@ -245,9 +245,13 @@ final class MenuBarItemTriggersManager: ObservableObject {
         guard pendingApplyTasks[triggerID] == nil else { return }
         // Use the most conservative (longest) settle across all conditions so
         // a jittery source (e.g. battery) still absorbs flapping.
-        let settle = triggers.first(where: { $0.id == triggerID })
-            .map { trigger in trigger.allConditions.map(\.kind.settleInterval).max() ?? flipDebounce }
-            ?? flipDebounce
+        let settle: Duration = {
+            guard let trigger = triggers.first(where: { $0.id == triggerID }) else { return flipDebounce }
+            if let override = trigger.settleSecondsOverride, override > 0 {
+                return .seconds(override)
+            }
+            return trigger.allConditions.map(\.kind.settleInterval).max() ?? flipDebounce
+        }()
         pendingApplyTasks[triggerID] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: settle)
             guard !Task.isCancelled, let self else { return }
@@ -277,7 +281,19 @@ final class MenuBarItemTriggersManager: ObservableObject {
             .contains { $0.tag.tagIdentifier == trigger.itemIdentifier }
         guard present else { return }
 
+        let wasRevealed = lastAppliedReveal[trigger.id] == true
         lastAppliedReveal[trigger.id] = reveal
+
+        // Notify on the transition into the revealed state.
+        if reveal, !wasRevealed, trigger.notifyOnReveal {
+            let itemName = trigger.itemDisplayName.isEmpty ? "an item" : trigger.itemDisplayName
+            appState.userNotificationManager.requestAuthorization()
+            appState.userNotificationManager.addRequest(
+                with: .triggerFired,
+                title: trigger.displayName,
+                body: "Revealed \(itemName)."
+            )
+        }
 
         let section = reveal ? trigger.revealSection : trigger.hideSection
         let identifier = trigger.itemIdentifier
