@@ -10,6 +10,7 @@ import AppKit
 import Combine
 import CoreAudio
 import CoreLocation
+import CoreMediaIO
 import CoreWLAN
 import Foundation
 import Intents
@@ -71,6 +72,12 @@ struct SystemState: Equatable {
     /// The current system thermal pressure.
     var thermalState: ProcessInfo.ThermalState
 
+    /// Whether any camera is currently in use by some process.
+    var isCameraInUse: Bool
+
+    /// Whether any microphone is currently in use by some process.
+    var isMicrophoneInUse: Bool
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -87,7 +94,9 @@ struct SystemState: Equatable {
         currentLatitude: Double? = nil,
         currentLongitude: Double? = nil,
         isLowPowerMode: Bool = false,
-        thermalState: ProcessInfo.ThermalState = .nominal
+        thermalState: ProcessInfo.ThermalState = .nominal,
+        isCameraInUse: Bool = false,
+        isMicrophoneInUse: Bool = false
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -105,6 +114,8 @@ struct SystemState: Equatable {
         self.currentLongitude = currentLongitude
         self.isLowPowerMode = isLowPowerMode
         self.thermalState = thermalState
+        self.isCameraInUse = isCameraInUse
+        self.isMicrophoneInUse = isMicrophoneInUse
     }
 }
 
@@ -207,6 +218,7 @@ final class SystemStateMonitor: ObservableObject {
             || flags.isEnabled(.wifiSSID)
             || flags.isEnabled(.focusMode)
             || flags.isEnabled(.location)
+            || flags.isEnabled(.recordingDevices)
         setPolling(needsPoll)
 
         // Run one immediate sample so newly enabled sources populate now.
@@ -428,12 +440,18 @@ final class SystemStateMonitor: ObservableObject {
         // deactivation (see ThawFocusModeStore).
         let focusMode = flags.isEnabled(.focusMode) ? ThawFocusModeStore.activeMode : nil
         let coordinate = flags.isEnabled(.location) ? currentCoordinate : nil
+        let cameraInUse = flags.isEnabled(.recordingDevices) ? Self.isCameraInUse() : false
+        let micInUse = flags.isEnabled(.recordingDevices) ? Self.isMicrophoneInUse() : false
 
         update {
             if flags.isEnabled(.audioOutput) { $0.audioOutputDeviceName = audio }
             if flags.isEnabled(.bluetooth) { $0.connectedBluetoothDeviceNames = bluetooth }
             if flags.isEnabled(.vpn) { $0.isVPNActive = vpn }
             if flags.isEnabled(.wifiSSID) { $0.wifiSSID = ssid }
+            if flags.isEnabled(.recordingDevices) {
+                $0.isCameraInUse = cameraInUse
+                $0.isMicrophoneInUse = micInUse
+            }
             if flags.isEnabled(.focusMode) {
                 $0.isFocusActive = focus
                 $0.activeFocusModeName = focusMode
@@ -474,7 +492,9 @@ final class SystemStateMonitor: ObservableObject {
             isFocusActive: isFocusActive(),
             activeFocusModeName: ThawFocusModeStore.activeMode,
             isLowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-            thermalState: ProcessInfo.processInfo.thermalState
+            thermalState: ProcessInfo.processInfo.thermalState,
+            isCameraInUse: flags.isEnabled(.recordingDevices) ? isCameraInUse() : false,
+            isMicrophoneInUse: flags.isEnabled(.recordingDevices) ? isMicrophoneInUse() : false
         )
     }
 
@@ -536,6 +556,97 @@ final class SystemStateMonitor: ObservableObject {
             }
         }
         return names
+    }
+
+    /// Whether any camera is currently in use by some process. Reads the
+    /// CoreMediaIO "running somewhere" hardware property, which does not
+    /// require camera permission (no capture is performed).
+    static func isCameraInUse() -> Bool {
+        var address = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(0)
+        )
+        var dataSize: UInt32 = 0
+        let systemObject = CMIOObjectID(kCMIOObjectSystemObject)
+        guard
+            CMIOObjectGetPropertyDataSize(systemObject, &address, 0, nil, &dataSize) == noErr,
+            dataSize > 0
+        else {
+            return false
+        }
+        let count = Int(dataSize) / MemoryLayout<CMIOObjectID>.size
+        var devices = [CMIOObjectID](repeating: 0, count: count)
+        var used: UInt32 = 0
+        guard CMIOObjectGetPropertyData(systemObject, &address, 0, nil, dataSize, &used, &devices) == noErr else {
+            return false
+        }
+
+        for device in devices {
+            var runningAddress = CMIOObjectPropertyAddress(
+                mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
+                mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeWildcard),
+                mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementWildcard)
+            )
+            var isRunning: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if CMIOObjectGetPropertyData(device, &runningAddress, 0, nil, size, &size, &isRunning) == noErr, isRunning != 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether any microphone is currently in use by some process. Reads the
+    /// CoreAudio "running somewhere" hardware property on input devices,
+    /// which does not require microphone permission.
+    static func isMicrophoneInUse() -> Bool {
+        var listAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        guard
+            AudioObjectGetPropertyDataSize(systemObject, &listAddress, 0, nil, &dataSize) == noErr,
+            dataSize > 0
+        else {
+            return false
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var devices = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(systemObject, &listAddress, 0, nil, &dataSize, &devices) == noErr else {
+            return false
+        }
+
+        for device in devices {
+            // Only input-capable devices can be a microphone in use.
+            var streamsAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var streamsSize: UInt32 = 0
+            guard
+                AudioObjectGetPropertyDataSize(device, &streamsAddress, 0, nil, &streamsSize) == noErr,
+                streamsSize > 0
+            else {
+                continue
+            }
+
+            var runningAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var isRunning: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(device, &runningAddress, 0, nil, &size, &isRunning) == noErr, isRunning != 0 {
+                return true
+            }
+        }
+        return false
     }
 
     /// Heuristically detects an active VPN by inspecting the scoped system

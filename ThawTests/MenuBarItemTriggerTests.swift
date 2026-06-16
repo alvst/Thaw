@@ -204,6 +204,20 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertFalse(TriggerCondition.thermalPressure(atLeast: .fair).isSatisfied(state: nominal))
     }
 
+    func testCameraInUse() {
+        var on = state()
+        on.isCameraInUse = true
+        XCTAssertTrue(TriggerCondition.cameraInUse.isSatisfied(state: on))
+        XCTAssertFalse(TriggerCondition.cameraInUse.isSatisfied(state: state()))
+    }
+
+    func testMicrophoneInUse() {
+        var on = state()
+        on.isMicrophoneInUse = true
+        XCTAssertTrue(TriggerCondition.microphoneInUse.isSatisfied(state: on))
+        XCTAssertFalse(TriggerCondition.microphoneInUse.isSatisfied(state: state()))
+    }
+
     func testThermalLevelPreservedOnConversion() {
         let original = TriggerCondition.thermalPressure(atLeast: .critical)
         let converted = TriggerCondition.make(kind: .thermalPressure, preserving: original)

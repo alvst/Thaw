@@ -72,6 +72,10 @@ enum TriggerCondition: Codable, Hashable {
     case lowPowerMode
     case thermalPressure(atLeast: ThermalLevel)
 
+    // Recording devices
+    case cameraInUse
+    case microphoneInUse
+
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
     func isSatisfied(state: SystemState, now: Date = Date()) -> Bool {
@@ -128,6 +132,10 @@ enum TriggerCondition: Codable, Hashable {
             return state.isLowPowerMode
         case let .thermalPressure(level):
             return state.thermalState.rawValue >= level.rawValue
+        case .cameraInUse:
+            return state.isCameraInUse
+        case .microphoneInUse:
+            return state.isMicrophoneInUse
         }
     }
 
@@ -174,6 +182,10 @@ enum TriggerCondition: Codable, Hashable {
             return "Low Power Mode is on"
         case let .thermalPressure(level):
             return "Thermal pressure is \(level.displayString.lowercased())"
+        case .cameraInUse:
+            return "Camera is in use"
+        case .microphoneInUse:
+            return "Microphone is in use"
         }
     }
 
@@ -235,6 +247,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case nearLocation
     case lowPowerMode
     case thermalPressure
+    case cameraInUse
+    case microphoneInUse
 
     var id: String { rawValue }
 
@@ -260,6 +274,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .nearLocation: "Near a location"
         case .lowPowerMode: "Low Power Mode is on"
         case .thermalPressure: "Thermal pressure"
+        case .cameraInUse: "Camera is in use"
+        case .microphoneInUse: "Microphone is in use"
         }
     }
 
@@ -293,7 +309,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .nearLocation: .location
         case .thermalPressure: .thermalLevel
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive, .lowPowerMode:
+             .vpnActive, .externalDisplay, .focusActive, .lowPowerMode,
+             .cameraInUse, .microphoneInUse:
             .none
         }
     }
@@ -318,6 +335,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .nearLocation: .location
         case .lowPowerMode: .lowPowerMode
         case .thermalPressure: .thermalPressure
+        case .cameraInUse: .recordingDevices
+        case .microphoneInUse: .recordingDevices
         }
     }
 }
@@ -358,6 +377,8 @@ extension TriggerCondition {
         case .nearLocation: .nearLocation
         case .lowPowerMode: .lowPowerMode
         case .thermalPressure: .thermalPressure
+        case .cameraInUse: .cameraInUse
+        case .microphoneInUse: .microphoneInUse
         }
     }
 
@@ -433,6 +454,8 @@ extension TriggerCondition {
         case .nearLocation: .nearLocation(latitude: 0, longitude: 0, radiusMeters: 150, label: "")
         case .lowPowerMode: .lowPowerMode
         case .thermalPressure: .thermalPressure(atLeast: .serious)
+        case .cameraInUse: .cameraInUse
+        case .microphoneInUse: .microphoneInUse
         }
     }
 
@@ -453,7 +476,8 @@ extension TriggerCondition {
                 ?? .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
         case .thermalPressure: .thermalPressure(atLeast: old.thermalLevel ?? .serious)
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive, .nearLocation, .lowPowerMode:
+             .vpnActive, .externalDisplay, .focusActive, .nearLocation, .lowPowerMode,
+             .cameraInUse, .microphoneInUse:
             defaultCondition(for: kind)
         }
     }

@@ -127,6 +127,8 @@ struct DeveloperSettingsPane: View {
                 stateRow("Audio output", state.audioOutputDeviceName ?? "—")
                 stateRow("Low Power Mode", state.isLowPowerMode ? "On" : "Off")
                 stateRow("Thermal state", thermalString(state.thermalState))
+                stateRow("Camera in use", flags.isEnabled(.recordingDevices) ? (state.isCameraInUse ? "Yes" : "No") : "Enable flag to read")
+                stateRow("Microphone in use", flags.isEnabled(.recordingDevices) ? (state.isMicrophoneInUse ? "Yes" : "No") : "Enable flag to read")
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
                 stateRow("Focus active", state.isFocusActive ? "Yes" : "No")
                 stateRow("Focus mode", state.activeFocusModeName ?? "—")

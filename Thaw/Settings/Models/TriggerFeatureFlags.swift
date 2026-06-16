@@ -33,6 +33,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     case location
     case lowPowerMode
     case thermalPressure
+    case recordingDevices
     case compoundConditions
     case invertAction
 
@@ -54,6 +55,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .location: "Location"
         case .lowPowerMode: "Low Power Mode"
         case .thermalPressure: "Thermal pressure"
+        case .recordingDevices: "Camera / microphone in use"
         case .compoundConditions: "Combine conditions (AND / OR)"
         case .invertAction: "Invert action (hide when met)"
         }
@@ -75,6 +77,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .location: "Reveal an item while you're near a saved place (uses Location)."
         case .lowPowerMode: "Reveal an item while macOS Low Power Mode is on."
         case .thermalPressure: "Reveal an item when the system is under thermal pressure."
+        case .recordingDevices: "Reveal an item while the camera or microphone is in use."
         case .compoundConditions: "Let a trigger combine several conditions with AND / OR."
         case .invertAction: "Allow triggers to hide (instead of reveal) when the condition is met."
         }
