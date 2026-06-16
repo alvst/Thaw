@@ -200,13 +200,13 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         let now = Date()
         for trigger in triggers where trigger.isEnabled {
-            guard !trigger.itemIdentifier.isEmpty else { continue }
+            guard !trigger.allItemIdentifiers.isEmpty else { continue }
             guard isAvailable(trigger) else { continue }
 
-            // Skip without recording when the target item isn't present yet
-            // (e.g. its app hasn't launched), so the trigger re-applies once
-            // the item appears rather than getting stuck as "already applied".
-            guard presentIdentifiers.contains(trigger.itemIdentifier) else { continue }
+            // Skip without recording when none of the target items are present
+            // yet (e.g. their app hasn't launched), so the trigger re-applies
+            // once an item appears rather than getting stuck as "applied".
+            guard trigger.allItemIdentifiers.contains(where: presentIdentifiers.contains) else { continue }
 
             let reveal = trigger.shouldReveal(state: state, now: now)
 
@@ -277,9 +277,9 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// isn't currently present, so the trigger re-applies once it appears.
     private func apply(_ trigger: MenuBarItemTrigger, reveal: Bool) {
         guard let appState else { return }
-        let present = appState.itemManager.itemCache.managedItems
-            .contains { $0.tag.tagIdentifier == trigger.itemIdentifier }
-        guard present else { return }
+        let presentIDs = Set(appState.itemManager.itemCache.managedItems.map(\.tag.tagIdentifier))
+        let targets = trigger.allItemIdentifiers.filter(presentIDs.contains)
+        guard !targets.isEmpty else { return }
 
         let wasRevealed = lastAppliedReveal[trigger.id] == true
         lastAppliedReveal[trigger.id] = reveal
@@ -296,11 +296,12 @@ final class MenuBarItemTriggersManager: ObservableObject {
         }
 
         let section = reveal ? trigger.revealSection : trigger.hideSection
-        let identifier = trigger.itemIdentifier
-        diagLog.debug("Trigger \(trigger.displayName) reveal=\(reveal); moving \(identifier) to \(section.logString)")
+        diagLog.debug("Trigger \(trigger.displayName) reveal=\(reveal); moving \(targets.count) item(s) to \(section.logString)")
 
-        Task { @MainActor in
-            await appState.itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
+        for identifier in targets {
+            Task { @MainActor in
+                await appState.itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
+            }
         }
     }
 

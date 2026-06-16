@@ -587,6 +587,19 @@ extension TriggerCondition {
     }
 }
 
+// MARK: - TriggerTargetItem
+
+/// An additional menu bar item moved by a trigger alongside its primary item.
+struct TriggerTargetItem: Codable, Hashable {
+    var identifier: String
+    var displayName: String
+
+    init(identifier: String = "", displayName: String = "") {
+        self.identifier = identifier
+        self.displayName = displayName
+    }
+}
+
 // MARK: - TriggerCombinator
 
 /// How a trigger's multiple conditions are combined.
@@ -627,6 +640,10 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
     var isEnabled: Bool
     var itemIdentifier: String
     var itemDisplayName: String
+
+    /// Additional items moved alongside the primary item (advanced option).
+    var additionalItems: [TriggerTargetItem]
+
     var revealSection: MenuBarSection.Name
     var hideSection: MenuBarSection.Name
     var condition: TriggerCondition
@@ -655,6 +672,7 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         isEnabled: Bool = true,
         itemIdentifier: String = "",
         itemDisplayName: String = "",
+        additionalItems: [TriggerTargetItem] = [],
         revealSection: MenuBarSection.Name = .visible,
         hideSection: MenuBarSection.Name = .hidden,
         condition: TriggerCondition = .batteryBelow(percentage: 20),
@@ -669,6 +687,7 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         self.isEnabled = isEnabled
         self.itemIdentifier = itemIdentifier
         self.itemDisplayName = itemDisplayName
+        self.additionalItems = additionalItems
         self.revealSection = revealSection
         self.hideSection = hideSection
         self.condition = condition
@@ -684,6 +703,7 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         case revealSection, hideSection, condition, invert
         case additionalConditions, combinator
         case notifyOnReveal, settleSecondsOverride
+        case additionalItems
     }
 
     /// Forward-compatible decoding: `invert`, `additionalConditions`, and
@@ -704,6 +724,12 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         invert = try container.decodeIfPresent(Bool.self, forKey: .invert) ?? false
         notifyOnReveal = try container.decodeIfPresent(Bool.self, forKey: .notifyOnReveal) ?? false
         settleSecondsOverride = try container.decodeIfPresent(Double.self, forKey: .settleSecondsOverride)
+        additionalItems = try container.decodeIfPresent([TriggerTargetItem].self, forKey: .additionalItems) ?? []
+    }
+
+    /// All target item identifiers (primary first), excluding empties.
+    var allItemIdentifiers: [String] {
+        ([itemIdentifier] + additionalItems.map(\.identifier)).filter { !$0.isEmpty }
     }
 
     /// All conditions, primary first.

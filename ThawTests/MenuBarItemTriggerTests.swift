@@ -331,6 +331,29 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(decoded, trigger)
     }
 
+    // MARK: - Multiple target items
+
+    func testAllItemIdentifiersIncludesPrimaryAndAdditional() {
+        let trigger = MenuBarItemTrigger(
+            itemIdentifier: "a",
+            additionalItems: [TriggerTargetItem(identifier: "b", displayName: "B"), TriggerTargetItem(identifier: "", displayName: "")]
+        )
+        // Primary first, empties filtered out.
+        XCTAssertEqual(trigger.allItemIdentifiers, ["a", "b"])
+    }
+
+    func testMultiItemCodableRoundTrip() throws {
+        let trigger = MenuBarItemTrigger(
+            itemIdentifier: "a",
+            additionalItems: [TriggerTargetItem(identifier: "b", displayName: "B")],
+            notifyOnReveal: true,
+            settleSecondsOverride: 4
+        )
+        let data = try JSONEncoder().encode(trigger)
+        let decoded = try JSONDecoder().decode(MenuBarItemTrigger.self, from: data)
+        XCTAssertEqual(decoded, trigger)
+    }
+
     // MARK: - Invert
 
     func testInvertFlipsReveal() {

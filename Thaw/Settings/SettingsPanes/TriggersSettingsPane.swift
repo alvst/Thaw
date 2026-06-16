@@ -141,8 +141,10 @@ struct TriggersSettingsPane: View {
     /// Item identifiers targeted by more than one enabled trigger.
     private func conflictingItemIdentifiers() -> Set<String> {
         var counts = [String: Int]()
-        for trigger in manager.triggers where trigger.isEnabled && !trigger.itemIdentifier.isEmpty {
-            counts[trigger.itemIdentifier, default: 0] += 1
+        for trigger in manager.triggers where trigger.isEnabled {
+            for identifier in Set(trigger.allItemIdentifiers) {
+                counts[identifier, default: 0] += 1
+            }
         }
         return Set(counts.filter { $0.value > 1 }.keys)
     }
@@ -361,6 +363,36 @@ private struct TriggerRow: View {
     private var advancedOptions: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
+
+            ForEach(Array(trigger.additionalItems.indices), id: \.self) { index in
+                HStack(spacing: 8) {
+                    IcePicker("Also move", selection: additionalItemBinding(index)) {
+                        let current = trigger.additionalItems[index].identifier
+                        if !current.isEmpty, !itemOptions.contains(where: { $0.id == current }) {
+                            Text("\(trigger.additionalItems[index].displayName) (not present)").tag(current)
+                        }
+                        if current.isEmpty {
+                            Text("Choose an item…").tag("")
+                        }
+                        ForEach(itemOptions, id: \.id) { option in
+                            Text(option.name).tag(option.id)
+                        }
+                    }
+                    Button(role: .destructive) {
+                        trigger.additionalItems.remove(at: index)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            Button {
+                trigger.additionalItems.append(TriggerTargetItem())
+            } label: {
+                Label("Also move another item", systemImage: "plus")
+            }
+            .buttonStyle(.borderless)
+
             Toggle("Notify when this reveals the item", isOn: $trigger.notifyOnReveal)
                 .toggleStyle(.switch)
             HStack(spacing: 12) {
@@ -375,6 +407,19 @@ private struct TriggerRow: View {
                 }
             }
         }
+    }
+
+    private func additionalItemBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                index < trigger.additionalItems.count ? trigger.additionalItems[index].identifier : ""
+            },
+            set: { newValue in
+                guard index < trigger.additionalItems.count else { return }
+                let name = itemOptions.first(where: { $0.id == newValue })?.name ?? ""
+                trigger.additionalItems[index] = TriggerTargetItem(identifier: newValue, displayName: name)
+            }
+        )
     }
 
     private var delayEnabledBinding: Binding<Bool> {
