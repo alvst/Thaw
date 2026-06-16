@@ -69,6 +69,11 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// Guards against overlapping script-run passes.
     private var isRunningScripts = false
 
+    /// Serializes all trigger-driven item moves. Each batch awaits the
+    /// previous one so synthetic-drag moves never overlap — overlapping
+    /// moves desync the move engine's cursor hide/show and can strand items.
+    private var moveChain = Task<Void, Never> {}
+
     private let diagLog = DiagLog(category: "MenuBarItemTriggers")
 
     /// The system state used for evaluation, with cached script results
@@ -297,10 +302,18 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         let section = reveal ? trigger.revealSection : trigger.hideSection
         diagLog.debug("Trigger \(trigger.displayName) reveal=\(reveal); moving \(targets.count) item(s) to \(section.logString)")
+        enqueueMoves(targets, to: section)
+    }
 
-        for identifier in targets {
-            Task { @MainActor in
-                await appState.itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
+    /// Appends a batch of moves to the serial move chain so only one move
+    /// runs at a time, app-wide, regardless of how many triggers fire.
+    private func enqueueMoves(_ identifiers: [String], to section: MenuBarSection.Name) {
+        let previous = moveChain
+        moveChain = Task { @MainActor [weak self] in
+            _ = await previous.value
+            guard let self, let itemManager = self.appState?.itemManager else { return }
+            for identifier in identifiers {
+                await itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
             }
         }
     }
