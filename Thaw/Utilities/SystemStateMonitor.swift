@@ -18,6 +18,14 @@ import IOBluetooth
 import Network
 import SystemConfiguration
 
+// MARK: - ScriptOutcome
+
+/// The result of running a user script for a script-result trigger.
+struct ScriptOutcome: Equatable {
+    var exitCode: Int32
+    var output: String
+}
+
 // MARK: - SystemState
 
 /// A snapshot of the system signals that menu bar item triggers evaluate
@@ -78,6 +86,10 @@ struct SystemState: Equatable {
     /// Whether any microphone is currently in use by some process.
     var isMicrophoneInUse: Bool
 
+    /// Results of user scripts for script-result conditions, keyed by path.
+    /// Populated by the triggers manager (not the monitor) before evaluation.
+    var scriptOutcomes: [String: ScriptOutcome]
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -96,7 +108,8 @@ struct SystemState: Equatable {
         isLowPowerMode: Bool = false,
         thermalState: ProcessInfo.ThermalState = .nominal,
         isCameraInUse: Bool = false,
-        isMicrophoneInUse: Bool = false
+        isMicrophoneInUse: Bool = false,
+        scriptOutcomes: [String: ScriptOutcome] = [:]
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -116,6 +129,7 @@ struct SystemState: Equatable {
         self.thermalState = thermalState
         self.isCameraInUse = isCameraInUse
         self.isMicrophoneInUse = isMicrophoneInUse
+        self.scriptOutcomes = scriptOutcomes
     }
 }
 

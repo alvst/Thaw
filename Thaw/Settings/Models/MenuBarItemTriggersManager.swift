@@ -29,6 +29,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
             // move is still a no-op when the item is already in the right
             // section, so this does not warp the cursor on no-op edits.)
             lastAppliedReveal.removeAll()
+            runScriptsIfNeeded()
             scheduleEvaluation()
         }
     }
@@ -61,7 +62,22 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// Debounced forced-evaluation task, restarted on each edit.
     private var debouncedEvaluationTask: Task<Void, Never>?
 
+    /// Cached results of script-result conditions, keyed by script path,
+    /// injected into the system state at evaluation time.
+    private var scriptOutcomes = [String: ScriptOutcome]()
+
+    /// Guards against overlapping script-run passes.
+    private var isRunningScripts = false
+
     private let diagLog = DiagLog(category: "MenuBarItemTriggers")
+
+    /// The system state used for evaluation, with cached script results
+    /// merged in (the monitor itself does not run scripts).
+    private var evaluationState: SystemState {
+        var state = systemMonitor.state
+        state.scriptOutcomes = scriptOutcomes
+        return state
+    }
 
     init() {
         suppressPersist = true
@@ -78,8 +94,9 @@ final class MenuBarItemTriggersManager: ObservableObject {
         // Re-evaluate on every distinct system state change.
         systemMonitor.$state
             .removeDuplicates()
-            .sink { [weak self] state in
-                self?.evaluate(for: state, force: false)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.evaluate(for: self.evaluationState, force: false)
             }
             .store(in: &cancellables)
 
@@ -89,9 +106,12 @@ final class MenuBarItemTriggersManager: ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.evaluate(for: self.systemMonitor.state, force: true)
+                self.runScriptsIfNeeded()
+                self.evaluate(for: self.evaluationState, force: true)
             }
             .store(in: &cancellables)
+
+        runScriptsIfNeeded()
 
         // Re-apply when feature flags change (a newly enabled source may
         // satisfy a trigger that was previously inert).
@@ -104,9 +124,10 @@ final class MenuBarItemTriggersManager: ObservableObject {
         scheduleEvaluation()
     }
 
-    /// The current aggregated system state (for live UI readouts).
+    /// The current aggregated system state (for live UI readouts), with
+    /// cached script results merged in.
     var currentSystemState: SystemState {
-        systemMonitor.state
+        evaluationState
     }
 
     /// Whether the trigger's target item is currently placed in its reveal
@@ -240,7 +261,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
             else {
                 return
             }
-            let reveal = trigger.shouldReveal(state: self.systemMonitor.state)
+            let reveal = trigger.shouldReveal(state: self.evaluationState)
             guard self.lastAppliedReveal[triggerID] != reveal else { return }
             self.apply(trigger, reveal: reveal)
         }
@@ -264,6 +285,52 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         Task { @MainActor in
             await appState.itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
+        }
+    }
+
+    // MARK: - Scripts
+
+    /// Runs every distinct script referenced by an enabled script-result
+    /// condition (when the feature is on), updating cached outcomes and
+    /// re-evaluating when any result changes.
+    private func runScriptsIfNeeded() {
+        guard featureFlags.isEnabled(.scriptResult), !isRunningScripts else { return }
+
+        // Collect distinct, non-empty script paths in use by enabled triggers.
+        var paths = Set<String>()
+        for trigger in triggers where trigger.isEnabled {
+            for condition in trigger.allConditions {
+                if case let .scriptResult(path, _) = condition {
+                    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { paths.insert(trimmed) }
+                }
+            }
+        }
+
+        // Drop cached outcomes for paths no longer referenced.
+        let removed = Set(scriptOutcomes.keys).subtracting(paths)
+        for path in removed { scriptOutcomes[path] = nil }
+
+        guard !paths.isEmpty else { return }
+
+        isRunningScripts = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRunningScripts = false }
+
+            var changed = false
+            for path in paths {
+                let outcome = await TriggerScriptRunner.run(path: path)
+                let resolved = outcome ?? ScriptOutcome(exitCode: -1, output: "")
+                if self.scriptOutcomes[path] != resolved {
+                    self.scriptOutcomes[path] = resolved
+                    changed = true
+                }
+            }
+
+            if changed {
+                self.evaluate(for: self.evaluationState, force: false)
+            }
         }
     }
 

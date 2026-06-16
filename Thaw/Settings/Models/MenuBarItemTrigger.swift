@@ -76,6 +76,9 @@ enum TriggerCondition: Codable, Hashable {
     case cameraInUse
     case microphoneInUse
 
+    // Script
+    case scriptResult(path: String, expectedOutput: String)
+
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
     func isSatisfied(state: SystemState, now: Date = Date()) -> Bool {
@@ -136,6 +139,12 @@ enum TriggerCondition: Codable, Hashable {
             return state.isCameraInUse
         case .microphoneInUse:
             return state.isMicrophoneInUse
+        case let .scriptResult(path, expectedOutput):
+            guard let outcome = state.scriptOutcomes[path] else { return false }
+            if expectedOutput.isEmpty {
+                return outcome.exitCode == 0
+            }
+            return outcome.output.localizedCaseInsensitiveContains(expectedOutput)
         }
     }
 
@@ -186,6 +195,9 @@ enum TriggerCondition: Codable, Hashable {
             return "Camera is in use"
         case .microphoneInUse:
             return "Microphone is in use"
+        case let .scriptResult(path, expectedOutput):
+            let name = path.isEmpty ? "a script" : ((path as NSString).lastPathComponent)
+            return expectedOutput.isEmpty ? "\(name) exits 0" : "\(name) outputs “\(expectedOutput)”"
         }
     }
 
@@ -249,6 +261,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case thermalPressure
     case cameraInUse
     case microphoneInUse
+    case scriptResult
 
     var id: String { rawValue }
 
@@ -276,6 +289,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .thermalPressure: "Thermal pressure"
         case .cameraInUse: "Camera is in use"
         case .microphoneInUse: "Microphone is in use"
+        case .scriptResult: "Script result"
         }
     }
 
@@ -292,6 +306,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     var settleInterval: Duration {
         switch self {
         case .batteryBelow, .batteryAtOrAbove: .seconds(6)
+        case .scriptResult: .seconds(2)
         default: .seconds(1)
         }
     }
@@ -308,6 +323,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .schedule: .timeRange
         case .nearLocation: .location
         case .thermalPressure: .thermalLevel
+        case .scriptResult: .script
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive, .lowPowerMode,
              .cameraInUse, .microphoneInUse:
@@ -337,6 +353,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .thermalPressure: .thermalPressure
         case .cameraInUse: .recordingDevices
         case .microphoneInUse: .recordingDevices
+        case .scriptResult: .scriptResult
         }
     }
 }
@@ -350,6 +367,7 @@ enum TriggerConditionEditor: Equatable {
     case timeRange
     case location
     case thermalLevel
+    case script
 }
 
 // MARK: - TriggerCondition <-> Kind
@@ -379,6 +397,7 @@ extension TriggerCondition {
         case .thermalPressure: .thermalPressure
         case .cameraInUse: .cameraInUse
         case .microphoneInUse: .microphoneInUse
+        case .scriptResult: .scriptResult
         }
     }
 
@@ -432,6 +451,14 @@ extension TriggerCondition {
         }
     }
 
+    /// The script path and expected output, for the script-result condition.
+    var scriptValue: (path: String, expectedOutput: String)? {
+        switch self {
+        case let .scriptResult(path, expectedOutput): (path, expectedOutput)
+        default: nil
+        }
+    }
+
     /// Builds the default condition for the given kind.
     static func defaultCondition(for kind: TriggerConditionKind) -> TriggerCondition {
         switch kind {
@@ -456,6 +483,7 @@ extension TriggerCondition {
         case .thermalPressure: .thermalPressure(atLeast: .serious)
         case .cameraInUse: .cameraInUse
         case .microphoneInUse: .microphoneInUse
+        case .scriptResult: .scriptResult(path: "", expectedOutput: "")
         }
     }
 
@@ -475,6 +503,9 @@ extension TriggerCondition {
             old.scheduleWindow.map { TriggerCondition.schedule(startMinutes: $0.start, endMinutes: $0.end) }
                 ?? .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
         case .thermalPressure: .thermalPressure(atLeast: old.thermalLevel ?? .serious)
+        case .scriptResult:
+            old.scriptValue.map { TriggerCondition.scriptResult(path: $0.path, expectedOutput: $0.expectedOutput) }
+                ?? .scriptResult(path: "", expectedOutput: "")
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive, .nearLocation, .lowPowerMode,
              .cameraInUse, .microphoneInUse:
@@ -517,6 +548,18 @@ extension TriggerCondition {
         case .schedule: .schedule(startMinutes: start, endMinutes: end)
         default: self
         }
+    }
+
+    /// Returns a copy of the script condition with the path replaced.
+    func withScriptPath(_ path: String) -> TriggerCondition {
+        guard case let .scriptResult(_, expectedOutput) = self else { return self }
+        return .scriptResult(path: path, expectedOutput: expectedOutput)
+    }
+
+    /// Returns a copy of the script condition with the expected output replaced.
+    func withScriptExpectedOutput(_ expectedOutput: String) -> TriggerCondition {
+        guard case let .scriptResult(path, _) = self else { return self }
+        return .scriptResult(path: path, expectedOutput: expectedOutput)
     }
 
     /// Returns a copy with the thermal threshold replaced.

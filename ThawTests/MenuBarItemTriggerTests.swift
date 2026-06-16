@@ -218,6 +218,35 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertFalse(TriggerCondition.microphoneInUse.isSatisfied(state: state()))
     }
 
+    // MARK: - Script result
+
+    private func scriptState(_ path: String, exit: Int32, output: String) -> SystemState {
+        var s = state()
+        s.scriptOutcomes = [path: ScriptOutcome(exitCode: exit, output: output)]
+        return s
+    }
+
+    func testScriptResultExitCode() {
+        let condition = TriggerCondition.scriptResult(path: "/tmp/s.sh", expectedOutput: "")
+        XCTAssertTrue(condition.isSatisfied(state: scriptState("/tmp/s.sh", exit: 0, output: "")))
+        XCTAssertFalse(condition.isSatisfied(state: scriptState("/tmp/s.sh", exit: 1, output: "")))
+        // No outcome cached -> not satisfied.
+        XCTAssertFalse(condition.isSatisfied(state: state()))
+    }
+
+    func testScriptResultOutputMatch() {
+        let condition = TriggerCondition.scriptResult(path: "/tmp/s.sh", expectedOutput: "online")
+        XCTAssertTrue(condition.isSatisfied(state: scriptState("/tmp/s.sh", exit: 0, output: "status: ONLINE")))
+        XCTAssertFalse(condition.isSatisfied(state: scriptState("/tmp/s.sh", exit: 0, output: "offline")))
+    }
+
+    func testScriptValuePreservedOnConversion() {
+        let original = TriggerCondition.scriptResult(path: "/a", expectedOutput: "x")
+        let converted = TriggerCondition.make(kind: .scriptResult, preserving: original)
+        XCTAssertEqual(converted.scriptValue?.path, "/a")
+        XCTAssertEqual(converted.scriptValue?.expectedOutput, "x")
+    }
+
     func testThermalLevelPreservedOnConversion() {
         let original = TriggerCondition.thermalPressure(atLeast: .critical)
         let converted = TriggerCondition.make(kind: .thermalPressure, preserving: original)
