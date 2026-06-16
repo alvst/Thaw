@@ -65,6 +65,12 @@ struct SystemState: Equatable {
     var currentLatitude: Double?
     var currentLongitude: Double?
 
+    /// Whether macOS Low Power Mode is enabled.
+    var isLowPowerMode: Bool
+
+    /// The current system thermal pressure.
+    var thermalState: ProcessInfo.ThermalState
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -79,7 +85,9 @@ struct SystemState: Equatable {
         isFocusActive: Bool = false,
         activeFocusModeName: String? = nil,
         currentLatitude: Double? = nil,
-        currentLongitude: Double? = nil
+        currentLongitude: Double? = nil,
+        isLowPowerMode: Bool = false,
+        thermalState: ProcessInfo.ThermalState = .nominal
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -95,6 +103,8 @@ struct SystemState: Equatable {
         self.activeFocusModeName = activeFocusModeName
         self.currentLatitude = currentLatitude
         self.currentLongitude = currentLongitude
+        self.isLowPowerMode = isLowPowerMode
+        self.thermalState = thermalState
     }
 }
 
@@ -122,6 +132,7 @@ final class SystemStateMonitor: ObservableObject {
     // Event-driven source handles.
     private var workspaceObservers = [NSObjectProtocol]()
     private var screenObserver: NSObjectProtocol?
+    private var systemLoadObservers = [NSObjectProtocol]()
     private var pathMonitor: NWPathMonitor?
 
     // Poll timer for the sampled sources.
@@ -174,6 +185,7 @@ final class SystemStateMonitor: ObservableObject {
         setFrontmostAppMonitoring(flags.isEnabled(.frontmostApp) || flags.isEnabled(.appRunning))
         setDisplayMonitoring(flags.isEnabled(.display))
         setNetworkMonitoring(flags.isEnabled(.network) || flags.isEnabled(.vpn))
+        setSystemLoadMonitoring(flags.isEnabled(.lowPowerMode) || flags.isEnabled(.thermalPressure))
 
         // Both Wi-Fi SSID and the location condition need Location access.
         if flags.isEnabled(.wifiSSID) || flags.isEnabled(.location) {
@@ -330,6 +342,45 @@ final class SystemStateMonitor: ObservableObject {
         }
     }
 
+    // MARK: System load (Low Power Mode / thermal)
+
+    private func setSystemLoadMonitoring(_ enabled: Bool) {
+        let isRunning = !systemLoadObservers.isEmpty
+        guard enabled != isRunning else {
+            if enabled { refreshSystemLoad() }
+            return
+        }
+        if enabled {
+            let center = NotificationCenter.default
+            let names: [NSNotification.Name] = [
+                .NSProcessInfoPowerStateDidChange,
+                ProcessInfo.thermalStateDidChangeNotification,
+            ]
+            for name in names {
+                let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refreshSystemLoad() }
+                }
+                systemLoadObservers.append(token)
+            }
+            refreshSystemLoad()
+        } else {
+            for token in systemLoadObservers {
+                NotificationCenter.default.removeObserver(token)
+            }
+            systemLoadObservers.removeAll()
+        }
+    }
+
+    private func refreshSystemLoad() {
+        let info = ProcessInfo.processInfo
+        let lowPower = info.isLowPowerModeEnabled
+        let thermal = info.thermalState
+        update {
+            $0.isLowPowerMode = lowPower
+            $0.thermalState = thermal
+        }
+    }
+
     // MARK: Network
 
     private func setNetworkMonitoring(_ enabled: Bool) {
@@ -421,7 +472,9 @@ final class SystemStateMonitor: ObservableObject {
             screenCount: NSScreen.screens.count,
             externalDisplayConnected: hasExternalDisplay(),
             isFocusActive: isFocusActive(),
-            activeFocusModeName: ThawFocusModeStore.activeMode
+            activeFocusModeName: ThawFocusModeStore.activeMode,
+            isLowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            thermalState: ProcessInfo.processInfo.thermalState
         )
     }
 

@@ -31,6 +31,8 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     case schedule
     case focusMode
     case location
+    case lowPowerMode
+    case thermalPressure
     case invertAction
 
     var id: String { rawValue }
@@ -49,6 +51,8 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .schedule: "Time schedule"
         case .focusMode: "Focus / Do Not Disturb"
         case .location: "Location"
+        case .lowPowerMode: "Low Power Mode"
+        case .thermalPressure: "Thermal pressure"
         case .invertAction: "Invert action (hide when met)"
         }
     }
@@ -67,6 +71,8 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .schedule: "Reveal an item during a time-of-day window."
         case .focusMode: "Reveal an item while a macOS Focus is active."
         case .location: "Reveal an item while you're near a saved place (uses Location)."
+        case .lowPowerMode: "Reveal an item while macOS Low Power Mode is on."
+        case .thermalPressure: "Reveal an item when the system is under thermal pressure."
         case .invertAction: "Allow triggers to hide (instead of reveal) when the condition is met."
         }
     }

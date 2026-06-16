@@ -425,6 +425,12 @@ private struct TriggerRow: View {
             timeRangeEditor
         case .location:
             locationEditor
+        case .thermalLevel:
+            IcePicker("Threshold", selection: thermalLevelBinding) {
+                ForEach(ThermalLevel.allCases) { level in
+                    Text(level.displayString).tag(level)
+                }
+            }
         case .none:
             EmptyView()
         }
@@ -564,6 +570,13 @@ private struct TriggerRow: View {
         Binding(
             get: { trigger.condition.locationValue?.label ?? "" },
             set: { trigger.condition = trigger.condition.withLocation(label: $0) }
+        )
+    }
+
+    private var thermalLevelBinding: Binding<ThermalLevel> {
+        Binding(
+            get: { trigger.condition.thermalLevel ?? .serious },
+            set: { trigger.condition = trigger.condition.withThermalLevel($0) }
         )
     }
 

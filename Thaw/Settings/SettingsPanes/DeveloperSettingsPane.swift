@@ -125,6 +125,8 @@ struct DeveloperSettingsPane: View {
                 stateRow("Wi-Fi SSID", wifiSSIDValue(state))
                 stateRow("Bluetooth", flags.isEnabled(.bluetooth) ? state.connectedBluetoothDeviceNames.sorted().joined(separator: ", ").orDash : "Enable flag to read")
                 stateRow("Audio output", state.audioOutputDeviceName ?? "—")
+                stateRow("Low Power Mode", state.isLowPowerMode ? "On" : "Off")
+                stateRow("Thermal state", thermalString(state.thermalState))
                 stateRow("Displays", "\(state.screenCount)\(state.externalDisplayConnected ? " (external connected)" : "")")
                 stateRow("Focus active", state.isFocusActive ? "Yes" : "No")
                 stateRow("Focus mode", state.activeFocusModeName ?? "—")
@@ -150,6 +152,16 @@ struct DeveloperSettingsPane: View {
     private func batteryString(_ power: PowerState) -> String {
         guard let percentage = power.batteryPercentage else { return "No battery" }
         return "\(Int(percentage.rounded()))%"
+    }
+
+    private func thermalString(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: "Nominal"
+        case .fair: "Fair"
+        case .serious: "Serious"
+        case .critical: "Critical"
+        @unknown default: "Unknown"
+        }
     }
 
     /// Current coordinate when the Location flag is on, otherwise a hint.

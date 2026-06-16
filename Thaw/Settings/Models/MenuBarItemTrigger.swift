@@ -10,6 +10,26 @@ import AppKit
 import CoreLocation
 import Foundation
 
+// MARK: - ThermalLevel
+
+/// A user-selectable thermal-pressure threshold, mapped to
+/// `ProcessInfo.ThermalState` raw values (nominal = 0).
+enum ThermalLevel: Int, Codable, Hashable, CaseIterable, Identifiable {
+    case fair = 1
+    case serious = 2
+    case critical = 3
+
+    var id: Int { rawValue }
+
+    var displayString: String {
+        switch self {
+        case .fair: "Fair or higher"
+        case .serious: "Serious or higher"
+        case .critical: "Critical"
+        }
+    }
+}
+
 // MARK: - TriggerCondition
 
 /// A condition that decides whether a ``MenuBarItemTrigger`` is currently
@@ -47,6 +67,10 @@ enum TriggerCondition: Codable, Hashable {
 
     // Location
     case nearLocation(latitude: Double, longitude: Double, radiusMeters: Double, label: String)
+
+    // System load
+    case lowPowerMode
+    case thermalPressure(atLeast: ThermalLevel)
 
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
@@ -100,6 +124,10 @@ enum TriggerCondition: Codable, Hashable {
             let here = CLLocation(latitude: currentLat, longitude: currentLon)
             let target = CLLocation(latitude: latitude, longitude: longitude)
             return here.distance(from: target) <= radiusMeters
+        case .lowPowerMode:
+            return state.isLowPowerMode
+        case let .thermalPressure(level):
+            return state.thermalState.rawValue >= level.rawValue
         }
     }
 
@@ -142,6 +170,10 @@ enum TriggerCondition: Codable, Hashable {
         case let .nearLocation(_, _, radiusMeters, label):
             let place = label.isEmpty ? "a saved location" : "“\(label)”"
             return "Within \(Int(radiusMeters))m of \(place)"
+        case .lowPowerMode:
+            return "Low Power Mode is on"
+        case let .thermalPressure(level):
+            return "Thermal pressure is \(level.displayString.lowercased())"
         }
     }
 
@@ -201,6 +233,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case focusActive
     case focusModeNamed
     case nearLocation
+    case lowPowerMode
+    case thermalPressure
 
     var id: String { rawValue }
 
@@ -224,6 +258,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .focusActive: "Any Focus is active"
         case .focusModeNamed: "Focus mode is"
         case .nearLocation: "Near a location"
+        case .lowPowerMode: "Low Power Mode is on"
+        case .thermalPressure: "Thermal pressure"
         }
     }
 
@@ -255,8 +291,9 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .focusModeNamed: .text(prompt: "Focus mode name (e.g. Work)")
         case .schedule: .timeRange
         case .nearLocation: .location
+        case .thermalPressure: .thermalLevel
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive:
+             .vpnActive, .externalDisplay, .focusActive, .lowPowerMode:
             .none
         }
     }
@@ -279,6 +316,8 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .focusActive: .focusMode
         case .focusModeNamed: .focusMode
         case .nearLocation: .location
+        case .lowPowerMode: .lowPowerMode
+        case .thermalPressure: .thermalPressure
         }
     }
 }
@@ -291,6 +330,7 @@ enum TriggerConditionEditor: Equatable {
     case text(prompt: String)
     case timeRange
     case location
+    case thermalLevel
 }
 
 // MARK: - TriggerCondition <-> Kind
@@ -316,6 +356,8 @@ extension TriggerCondition {
         case .focusActive: .focusActive
         case .focusMode: .focusModeNamed
         case .nearLocation: .nearLocation
+        case .lowPowerMode: .lowPowerMode
+        case .thermalPressure: .thermalPressure
         }
     }
 
@@ -361,6 +403,14 @@ extension TriggerCondition {
         }
     }
 
+    /// The thermal threshold, for the thermal-pressure condition.
+    var thermalLevel: ThermalLevel? {
+        switch self {
+        case let .thermalPressure(level): level
+        default: nil
+        }
+    }
+
     /// Builds the default condition for the given kind.
     static func defaultCondition(for kind: TriggerConditionKind) -> TriggerCondition {
         switch kind {
@@ -381,6 +431,8 @@ extension TriggerCondition {
         case .focusActive: .focusActive
         case .focusModeNamed: .focusMode(name: "")
         case .nearLocation: .nearLocation(latitude: 0, longitude: 0, radiusMeters: 150, label: "")
+        case .lowPowerMode: .lowPowerMode
+        case .thermalPressure: .thermalPressure(atLeast: .serious)
         }
     }
 
@@ -399,8 +451,9 @@ extension TriggerCondition {
         case .schedule:
             old.scheduleWindow.map { TriggerCondition.schedule(startMinutes: $0.start, endMinutes: $0.end) }
                 ?? .schedule(startMinutes: 9 * 60, endMinutes: 17 * 60)
+        case .thermalPressure: .thermalPressure(atLeast: old.thermalLevel ?? .serious)
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive, .nearLocation:
+             .vpnActive, .externalDisplay, .focusActive, .nearLocation, .lowPowerMode:
             defaultCondition(for: kind)
         }
     }
@@ -438,6 +491,14 @@ extension TriggerCondition {
     func withSchedule(start: Int, end: Int) -> TriggerCondition {
         switch self {
         case .schedule: .schedule(startMinutes: start, endMinutes: end)
+        default: self
+        }
+    }
+
+    /// Returns a copy with the thermal threshold replaced.
+    func withThermalLevel(_ level: ThermalLevel) -> TriggerCondition {
+        switch self {
+        case .thermalPressure: .thermalPressure(atLeast: level)
         default: self
         }
     }

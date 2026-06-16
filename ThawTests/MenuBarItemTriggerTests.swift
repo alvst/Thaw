@@ -183,6 +183,33 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertFalse(condition.isSatisfied(state: state(), now: date(hour: 10, minute: 0)))
     }
 
+    // MARK: - System load
+
+    func testLowPowerMode() {
+        var on = state()
+        on.isLowPowerMode = true
+        XCTAssertTrue(TriggerCondition.lowPowerMode.isSatisfied(state: on))
+        XCTAssertFalse(TriggerCondition.lowPowerMode.isSatisfied(state: state()))
+    }
+
+    func testThermalPressureThreshold() {
+        var serious = state()
+        serious.thermalState = .serious
+        XCTAssertTrue(TriggerCondition.thermalPressure(atLeast: .fair).isSatisfied(state: serious))
+        XCTAssertTrue(TriggerCondition.thermalPressure(atLeast: .serious).isSatisfied(state: serious))
+        XCTAssertFalse(TriggerCondition.thermalPressure(atLeast: .critical).isSatisfied(state: serious))
+
+        var nominal = state()
+        nominal.thermalState = .nominal
+        XCTAssertFalse(TriggerCondition.thermalPressure(atLeast: .fair).isSatisfied(state: nominal))
+    }
+
+    func testThermalLevelPreservedOnConversion() {
+        let original = TriggerCondition.thermalPressure(atLeast: .critical)
+        let converted = TriggerCondition.make(kind: .thermalPressure, preserving: original)
+        XCTAssertEqual(converted.thermalLevel, .critical)
+    }
+
     // MARK: - Kind / editor mapping
 
     func testKindRoundTrip() {
