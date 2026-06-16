@@ -520,6 +520,31 @@ extension TriggerCondition {
     }
 }
 
+// MARK: - TriggerCombinator
+
+/// How a trigger's multiple conditions are combined.
+enum TriggerCombinator: String, Codable, Hashable, CaseIterable, Identifiable {
+    case all
+    case any
+
+    var id: String { rawValue }
+
+    var displayString: String {
+        switch self {
+        case .all: "All of"
+        case .any: "Any of"
+        }
+    }
+
+    /// The phrase used to join condition summaries.
+    var joiner: String {
+        switch self {
+        case .all: " and "
+        case .any: " or "
+        }
+    }
+}
+
 // MARK: - MenuBarItemTrigger
 
 /// A user-defined rule that conditionally reveals or hides a single menu
@@ -539,8 +564,15 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
     var hideSection: MenuBarSection.Name
     var condition: TriggerCondition
 
-    /// When `true`, the item is hidden (not revealed) while the condition
-    /// is satisfied. Gated by the `invertAction` feature flag in the UI.
+    /// Extra conditions combined with ``condition`` via ``combinator``.
+    /// Gated by the `compoundConditions` feature flag in the UI.
+    var additionalConditions: [TriggerCondition]
+
+    /// How ``condition`` and ``additionalConditions`` are combined.
+    var combinator: TriggerCombinator
+
+    /// When `true`, the item is hidden (not revealed) while the conditions
+    /// are satisfied. Gated by the `invertAction` feature flag in the UI.
     var invert: Bool
 
     init(
@@ -552,6 +584,8 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         revealSection: MenuBarSection.Name = .visible,
         hideSection: MenuBarSection.Name = .hidden,
         condition: TriggerCondition = .batteryBelow(percentage: 20),
+        additionalConditions: [TriggerCondition] = [],
+        combinator: TriggerCombinator = .all,
         invert: Bool = false
     ) {
         self.id = id
@@ -562,16 +596,20 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         self.revealSection = revealSection
         self.hideSection = hideSection
         self.condition = condition
+        self.additionalConditions = additionalConditions
+        self.combinator = combinator
         self.invert = invert
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, isEnabled, itemIdentifier, itemDisplayName
         case revealSection, hideSection, condition, invert
+        case additionalConditions, combinator
     }
 
-    /// Forward-compatible decoding: `invert` was added after the first
-    /// release and is absent from triggers persisted before then.
+    /// Forward-compatible decoding: `invert`, `additionalConditions`, and
+    /// `combinator` were added after earlier releases and are absent from
+    /// triggers persisted before then.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -582,21 +620,39 @@ struct MenuBarItemTrigger: Codable, Hashable, Identifiable {
         revealSection = try container.decode(MenuBarSection.Name.self, forKey: .revealSection)
         hideSection = try container.decode(MenuBarSection.Name.self, forKey: .hideSection)
         condition = try container.decode(TriggerCondition.self, forKey: .condition)
+        additionalConditions = try container.decodeIfPresent([TriggerCondition].self, forKey: .additionalConditions) ?? []
+        combinator = try container.decodeIfPresent(TriggerCombinator.self, forKey: .combinator) ?? .all
         invert = try container.decodeIfPresent(Bool.self, forKey: .invert) ?? false
     }
 
-    /// Evaluates whether the target item should be revealed, accounting for
-    /// the invert flag.
+    /// All conditions, primary first.
+    var allConditions: [TriggerCondition] {
+        [condition] + additionalConditions
+    }
+
+    /// Evaluates whether the target item should be revealed, combining all
+    /// conditions per ``combinator`` and accounting for the invert flag.
     func shouldReveal(state: SystemState, now: Date = Date()) -> Bool {
-        let satisfied = condition.isSatisfied(state: state, now: now)
+        let conditions = allConditions
+        let satisfied: Bool = switch combinator {
+        case .all: conditions.allSatisfy { $0.isSatisfied(state: state, now: now) }
+        case .any: conditions.contains { $0.isSatisfied(state: state, now: now) }
+        }
         return invert ? !satisfied : satisfied
     }
 
+    /// A combined, human-readable summary of all conditions.
+    var conditionSummary: String {
+        let parts = allConditions.map(\.summary)
+        guard parts.count > 1 else { return parts.first ?? "" }
+        return parts.joined(separator: combinator.joiner)
+    }
+
     /// A smart, auto-generated title combining the target item and the
-    /// condition, e.g. "Battery: Battery is below 20%". Used as the default
-    /// display name and the name-field placeholder.
+    /// condition(s), e.g. "Battery: Battery is below 20%". Used as the
+    /// default display name and the name-field placeholder.
     var autoTitle: String {
-        let summary = condition.summary
+        let summary = conditionSummary
         if itemDisplayName.isEmpty { return summary }
         return "\(itemDisplayName): \(summary)"
     }

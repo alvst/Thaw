@@ -205,11 +205,14 @@ final class MenuBarItemTriggersManager: ObservableObject {
         }
     }
 
-    /// Whether the trigger's condition is currently available (its feature
-    /// flag is enabled, or it is an always-available power condition).
+    /// Whether all of the trigger's conditions are currently available
+    /// (each condition's feature flag is enabled, or it is an
+    /// always-available power condition).
     private func isAvailable(_ trigger: MenuBarItemTrigger) -> Bool {
-        guard let feature = trigger.condition.kind.requiredFeature else { return true }
-        return featureFlags.isEnabled(feature)
+        trigger.allConditions.allSatisfy { condition in
+            guard let feature = condition.kind.requiredFeature else { return true }
+            return featureFlags.isEnabled(feature)
+        }
     }
 
     /// Schedules a debounced apply, re-checking the live state when the
@@ -219,7 +222,11 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// responsive.
     private func scheduleDebouncedApply(for triggerID: UUID) {
         guard pendingApplyTasks[triggerID] == nil else { return }
-        let settle = triggers.first(where: { $0.id == triggerID })?.condition.kind.settleInterval ?? flipDebounce
+        // Use the most conservative (longest) settle across all conditions so
+        // a jittery source (e.g. battery) still absorbs flapping.
+        let settle = triggers.first(where: { $0.id == triggerID })
+            .map { trigger in trigger.allConditions.map(\.kind.settleInterval).max() ?? flipDebounce }
+            ?? flipDebounce
         pendingApplyTasks[triggerID] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: settle)
             guard !Task.isCancelled, let self else { return }

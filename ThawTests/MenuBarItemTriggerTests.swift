@@ -238,6 +238,56 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(TriggerConditionKind.schedule.requiredFeature, .schedule)
     }
 
+    // MARK: - Compound conditions
+
+    func testCompoundAllRequiresEveryCondition() {
+        let trigger = MenuBarItemTrigger(
+            condition: .onBatteryPower,
+            additionalConditions: [.batteryBelow(percentage: 30)],
+            combinator: .all
+        )
+        // On battery AND below 30%.
+        XCTAssertTrue(trigger.shouldReveal(state: state(battery: 20, onAC: false)))
+        // On battery but not below 30%.
+        XCTAssertFalse(trigger.shouldReveal(state: state(battery: 80, onAC: false)))
+        // Below 30% but on AC.
+        XCTAssertFalse(trigger.shouldReveal(state: state(battery: 20, onAC: true)))
+    }
+
+    func testCompoundAnyRequiresOneCondition() {
+        let trigger = MenuBarItemTrigger(
+            condition: .vpnActive,
+            additionalConditions: [.wifiSSID(name: "Home")],
+            combinator: .any
+        )
+        XCTAssertTrue(trigger.shouldReveal(state: state(vpn: true)))
+        XCTAssertTrue(trigger.shouldReveal(state: state(vpn: false, ssid: "Home")))
+        XCTAssertFalse(trigger.shouldReveal(state: state(vpn: false, ssid: "Office")))
+    }
+
+    func testCompoundWithInvert() {
+        let trigger = MenuBarItemTrigger(
+            condition: .onACPower,
+            additionalConditions: [.charging],
+            combinator: .all,
+            invert: true
+        )
+        // AC and charging -> satisfied -> inverted hides (shouldReveal false).
+        XCTAssertFalse(trigger.shouldReveal(state: state(onAC: true, charging: true)))
+        XCTAssertTrue(trigger.shouldReveal(state: state(onAC: true, charging: false)))
+    }
+
+    func testCompoundCodableRoundTrip() throws {
+        let trigger = MenuBarItemTrigger(
+            condition: .onBatteryPower,
+            additionalConditions: [.batteryBelow(percentage: 25), .thermalPressure(atLeast: .serious)],
+            combinator: .any
+        )
+        let data = try JSONEncoder().encode(trigger)
+        let decoded = try JSONDecoder().decode(MenuBarItemTrigger.self, from: data)
+        XCTAssertEqual(decoded, trigger)
+    }
+
     // MARK: - Invert
 
     func testInvertFlipsReveal() {

@@ -92,14 +92,16 @@ struct TriggersSettingsPane: View {
                 emptyState
             } else {
                 let conflicts = conflictingItemIdentifiers()
+                let kinds = enabledKinds()
                 ForEach($manager.triggers) { $trigger in
                     TriggerRow(
                         trigger: $trigger,
                         itemOptions: itemOptions,
                         appOptions: appOptions,
-                        availableKinds: availableKinds(currentKind: trigger.condition.kind),
+                        enabledKinds: kinds,
+                        compoundEnabled: flags.isEnabled(.compoundConditions),
                         invertEnabled: flags.isEnabled(.invertAction),
-                        conditionActive: isConditionActive(trigger.condition.kind),
+                        conditionActive: allConditionsActive(trigger),
                         liveStatus: liveStatus(for: trigger),
                         hasConflict: !trigger.itemIdentifier.isEmpty && conflicts.contains(trigger.itemIdentifier),
                         currentCoordinate: { manager.systemMonitor.currentCoordinate },
@@ -131,7 +133,7 @@ struct TriggersSettingsPane: View {
     private func liveStatus(for trigger: MenuBarItemTrigger) -> TriggerLiveStatus {
         _ = liveTick // re-read on each tick
         guard trigger.isEnabled else { return .disabled }
-        guard isConditionActive(trigger.condition.kind) else { return .inactive }
+        guard allConditionsActive(trigger) else { return .inactive }
         return trigger.shouldReveal(state: manager.currentSystemState) ? .revealing : .hidden
     }
 
@@ -149,20 +151,23 @@ struct TriggersSettingsPane: View {
     /// The condition kinds offered in the picker: always-available power
     /// kinds, kinds whose feature flag is enabled, plus the trigger's own
     /// current kind (so a disabled flag never hides an existing selection).
-    private func availableKinds(currentKind: TriggerConditionKind) -> [TriggerConditionKind] {
+    /// Condition kinds whose feature flag is enabled (or which are always
+    /// available). The editor additionally always includes a condition's own
+    /// current kind, so a disabled flag never hides an existing selection.
+    private func enabledKinds() -> [TriggerConditionKind] {
         TriggerConditionKind.allCases.filter { kind in
-            if kind == currentKind { return true }
             guard let feature = kind.requiredFeature else { return true }
             return flags.isEnabled(feature)
         }
     }
 
-    /// Whether the given condition kind's feature is currently enabled (or
-    /// it is an always-available power condition). A trigger whose condition
-    /// is inactive will not be evaluated.
-    private func isConditionActive(_ kind: TriggerConditionKind) -> Bool {
-        guard let feature = kind.requiredFeature else { return true }
-        return flags.isEnabled(feature)
+    /// Whether all of the trigger's conditions are currently active (their
+    /// feature flags enabled). An inactive trigger will not be evaluated.
+    private func allConditionsActive(_ trigger: MenuBarItemTrigger) -> Bool {
+        trigger.allConditions.allSatisfy { condition in
+            guard let feature = condition.kind.requiredFeature else { return true }
+            return flags.isEnabled(feature)
+        }
     }
 
     // MARK: Options refresh
@@ -268,7 +273,8 @@ private struct TriggerRow: View {
     @Binding var trigger: MenuBarItemTrigger
     let itemOptions: [TriggerItemOption]
     let appOptions: [TriggerAppOption]
-    let availableKinds: [TriggerConditionKind]
+    let enabledKinds: [TriggerConditionKind]
+    let compoundEnabled: Bool
     let invertEnabled: Bool
     let conditionActive: Bool
     let liveStatus: TriggerLiveStatus
@@ -302,8 +308,7 @@ private struct TriggerRow: View {
                 header
                 Divider()
                 itemPicker
-                conditionPicker
-                conditionEditor
+                conditionsSection
                 if trigger.isEnabled, !conditionActive {
                     inactiveConditionWarning
                 }
@@ -376,10 +381,86 @@ private struct TriggerRow: View {
 
     private var conditionPicker: some View {
         IcePicker("Condition", selection: kindBinding) {
-            ForEach(availableKinds) { kind in
+            ForEach(kindOptions) { kind in
                 Text(kind.displayString).tag(kind)
             }
         }
+    }
+
+    /// Enabled kinds, always including the current selection so a disabled
+    /// flag never hides an existing condition.
+    private var kindOptions: [TriggerConditionKind] {
+        enabledKinds.contains(trigger.condition.kind) ? enabledKinds : enabledKinds + [trigger.condition.kind]
+    }
+
+    // MARK: Conditions (primary + optional compound)
+
+    @ViewBuilder
+    private var conditionsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if compoundEnabled, !trigger.additionalConditions.isEmpty {
+                IcePicker("Match", selection: $trigger.combinator) {
+                    ForEach(TriggerCombinator.allCases) { combinator in
+                        Text(combinator.displayString).tag(combinator)
+                    }
+                }
+            }
+
+            conditionPicker
+            conditionEditor
+
+            if compoundEnabled {
+                ForEach(Array(trigger.additionalConditions.indices), id: \.self) { index in
+                    Divider()
+                    HStack(alignment: .top, spacing: 8) {
+                        ConditionEditorView(
+                            condition: additionalConditionBinding(index),
+                            kinds: enabledKinds,
+                            appOptions: appOptions,
+                            currentCoordinate: currentCoordinate,
+                            focusedField: focusedField,
+                            focusID: "c\(index + 1)-\(trigger.id)"
+                        )
+                        Button(role: .destructive) {
+                            removeCondition(index)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this condition")
+                    }
+                }
+
+                Button {
+                    addCondition()
+                } label: {
+                    Label("Add Condition", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    private func additionalConditionBinding(_ index: Int) -> Binding<TriggerCondition> {
+        Binding(
+            get: {
+                index < trigger.additionalConditions.count ? trigger.additionalConditions[index] : .onACPower
+            },
+            set: { newValue in
+                guard index < trigger.additionalConditions.count else { return }
+                trigger.additionalConditions[index] = newValue
+            }
+        )
+    }
+
+    private func addCondition() {
+        let kind = enabledKinds.first ?? .batteryBelow
+        trigger.additionalConditions.append(.defaultCondition(for: kind))
+    }
+
+    private func removeCondition(_ index: Int) {
+        guard index < trigger.additionalConditions.count else { return }
+        trigger.additionalConditions.remove(at: index)
     }
 
     private var inactiveConditionWarning: some View {
@@ -548,7 +629,7 @@ private struct TriggerRow: View {
         }
     }
 
-    private static func radiusPresets(including current: Double) -> [Double] {
+    static func radiusPresets(including current: Double) -> [Double] {
         var presets: [Double] = [50, 100, 150, 300, 500, 1000]
         if !presets.contains(current) {
             presets.append(current)
@@ -627,15 +708,173 @@ private struct TriggerRow: View {
         )
     }
 
-    private static func minutesToDate(_ minutes: Int) -> Date {
+    static func minutesToDate(_ minutes: Int) -> Date {
         Calendar.current.date(
             bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()
         ) ?? Date()
     }
 
-    private static func dateToMinutes(_ date: Date) -> Int {
+    static func dateToMinutes(_ date: Date) -> Int {
         let components = Calendar.current.dateComponents([.hour, .minute], from: date)
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    }
+}
+
+// MARK: - ConditionEditorView
+
+/// A self-contained editor for one ``TriggerCondition`` (kind picker plus the
+/// kind-specific editor). Used for a trigger's additional compound
+/// conditions; the primary condition is edited inline by ``TriggerRow``.
+private struct ConditionEditorView: View {
+    @Binding var condition: TriggerCondition
+    let kinds: [TriggerConditionKind]
+    let appOptions: [TriggerAppOption]
+    let currentCoordinate: () -> (latitude: Double, longitude: Double)?
+    var focusedField: FocusState<String?>.Binding
+    let focusID: String
+
+    private var kindOptions: [TriggerConditionKind] {
+        kinds.contains(condition.kind) ? kinds : kinds + [condition.kind]
+    }
+
+    private var kindBinding: Binding<TriggerConditionKind> {
+        Binding(
+            get: { condition.kind },
+            set: { condition = .make(kind: $0, preserving: condition) }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            IcePicker("Condition", selection: kindBinding) {
+                ForEach(kindOptions) { kind in
+                    Text(kind.displayString).tag(kind)
+                }
+            }
+            editor
+        }
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        switch condition.kind.editor {
+        case .percentage:
+            HStack(spacing: 12) {
+                Slider(value: percentageBinding, in: 0 ... 100, step: 1) { Text("Battery level") }
+                Text(verbatim: "\(Int(percentageBinding.wrappedValue.rounded()))%")
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+        case .appPicker:
+            IcePicker("Application", selection: bundleIDBinding) {
+                let current = condition.bundleID ?? ""
+                if current.isEmpty {
+                    Text("Choose an app…").tag("")
+                } else if !appOptions.contains(where: { $0.bundleID == current }) {
+                    Text("\(current) (not running)").tag(current)
+                }
+                ForEach(appOptions, id: \.bundleID) { option in
+                    Text(option.name).tag(option.bundleID)
+                }
+            }
+        case let .text(prompt):
+            CommitTextField(
+                title: prompt,
+                prompt: prompt,
+                value: textBinding,
+                focusedField: focusedField,
+                focusID: "text-\(focusID)"
+            )
+        case .timeRange:
+            let window = condition.scheduleWindow ?? (start: 540, end: 1020)
+            HStack(spacing: 12) {
+                DatePicker("From", selection: scheduleBinding(isStart: true, window: window), displayedComponents: .hourAndMinute)
+                DatePicker("To", selection: scheduleBinding(isStart: false, window: window), displayedComponents: .hourAndMinute)
+            }
+        case .location:
+            locationEditor
+        case .thermalLevel:
+            IcePicker("Threshold", selection: thermalLevelBinding) {
+                ForEach(ThermalLevel.allCases) { level in
+                    Text(level.displayString).tag(level)
+                }
+            }
+        case .none:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var locationEditor: some View {
+        let location = condition.locationValue ?? (latitude: 0, longitude: 0, radiusMeters: 150, label: "")
+        let coordinate = currentCoordinate()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Use Current Location") {
+                    if let coordinate {
+                        condition = condition.withLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                    }
+                }
+                .disabled(coordinate == nil)
+                Spacer()
+                if location.latitude != 0 || location.longitude != 0 {
+                    Text(verbatim: String(format: "%.4f, %.4f", location.latitude, location.longitude))
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                } else {
+                    Text("No location captured").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            IcePicker("Radius", selection: radiusBinding) {
+                ForEach(TriggerRow.radiusPresets(including: location.radiusMeters), id: \.self) { meters in
+                    Text("\(Int(meters)) m").tag(meters)
+                }
+            }
+            CommitTextField(
+                title: "Label (e.g. Home)",
+                prompt: "Label",
+                value: locationLabelBinding,
+                focusedField: focusedField,
+                focusID: "loclabel-\(focusID)"
+            )
+        }
+    }
+
+    // MARK: Bindings
+
+    private var percentageBinding: Binding<Double> {
+        Binding(get: { condition.percentage ?? 50 }, set: { condition = condition.withPercentage($0) })
+    }
+
+    private var bundleIDBinding: Binding<String> {
+        Binding(get: { condition.bundleID ?? "" }, set: { condition = condition.withBundleID($0) })
+    }
+
+    private var textBinding: Binding<String> {
+        Binding(get: { condition.text ?? "" }, set: { condition = condition.withText($0) })
+    }
+
+    private var radiusBinding: Binding<Double> {
+        Binding(get: { condition.locationValue?.radiusMeters ?? 150 }, set: { condition = condition.withLocation(radiusMeters: $0) })
+    }
+
+    private var locationLabelBinding: Binding<String> {
+        Binding(get: { condition.locationValue?.label ?? "" }, set: { condition = condition.withLocation(label: $0) })
+    }
+
+    private var thermalLevelBinding: Binding<ThermalLevel> {
+        Binding(get: { condition.thermalLevel ?? .serious }, set: { condition = condition.withThermalLevel($0) })
+    }
+
+    private func scheduleBinding(isStart: Bool, window: (start: Int, end: Int)) -> Binding<Date> {
+        Binding(
+            get: { TriggerRow.minutesToDate(isStart ? window.start : window.end) },
+            set: { newDate in
+                let minutes = TriggerRow.dateToMinutes(newDate)
+                condition = isStart
+                    ? condition.withSchedule(start: minutes, end: window.end)
+                    : condition.withSchedule(start: window.start, end: minutes)
+            }
+        )
     }
 }
 
