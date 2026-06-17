@@ -44,9 +44,9 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     /// A Boolean value that indicates whether this item should be rendered as a
     /// fixed system anchor in the layout UI.
     ///
-    /// macOS 27 exposes Apple modules as children of `MenuBarAgent`. These are
-    /// live AX items that should remain visible at their real positions, but Thaw
-    /// must not treat them as draggable or persist them into user layout order.
+    /// macOS 27 exposes Apple modules as children of `MenuBarAgent`. Most of
+    /// those modules are movable live AX items; only the trailing fixed system
+    /// controls should be rendered as disabled anchors in the layout UI.
     var isLayoutAnchoredSystemItem: Bool {
         if MenuBarItemTag.immovableItems.contains(where: { $0.namespace == namespace && $0.title == title }) {
             return true
@@ -195,8 +195,9 @@ extension MenuBarItemTag {
     /// These items have fixed positions at the trailing end of the menu bar,
     /// and cannot be hidden.
     ///
-    /// This list contains the "Clock", "Control Center", and "Screen Sharing" (ssMenuAgent) items.
-    static var immovableItems: [MenuBarItemTag] { [clock, controlCenter, ssMenuAgent] }
+    /// This list contains the "Clock", "Control Center", "Siri", and
+    /// "Screen Sharing" (ssMenuAgent) items.
+    static var immovableItems: [MenuBarItemTag] { [clock, controlCenter, siri, ssMenuAgent] }
 
     /// An array of tags for items that can be moved, but cannot be hidden.
     static var nonHideableItems: [MenuBarItemTag] { [visibleControlItem, audioVideoModule, faceTime, screenCaptureUI, gameMode] }
@@ -204,22 +205,15 @@ extension MenuBarItemTag {
     /// An array of tags for items representing Ice's control items.
     static let controlItems = ControlItem.Identifier.allCases.map(\.tag)
 
-    /// Apple modules currently observed under `com.apple.MenuBarAgent` on
-    /// macOS 27. These names come from `VisibleCC` keys and
-    /// `TrailingItemPreferredPositions` entries such as `module:Clock`.
+    /// Apple modules observed under `com.apple.MenuBarAgent` on macOS 27 that
+    /// behave as fixed trailing system controls. Other MenuBarAgent modules
+    /// (Wi-Fi, Bluetooth, Sound, Focus, Now Playing, etc.) remain movable.
     static let menuBarAgentAnchoredModuleTitles: Set<String> = [
-        "AudioVideoModule",
-        "Battery",
-        "BentoBox-0",
-        "Bluetooth",
         "Clock",
-        "Display",
-        "FocusModes",
-        "MusicRecognition",
-        "NowPlaying",
-        "ScreenMirroring",
-        "Sound",
-        "WiFi",
+        "ControlCenter",
+        "BentoBox-0",
+        "com.apple.menuextra.clock",
+        "com.apple.menuextra.controlcenter",
     ]
 
     /// Separate Apple/system agents that Thaw should display but not move.

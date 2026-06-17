@@ -1669,7 +1669,8 @@ extension MenuBarItemManager {
             if item.tag == .visibleControlItem {
                 return true
             }
-            if !item.canBeHidden {
+            let isMacOS27LayoutAnchor = !Constants.supportsSectionHiding && item.tag.isLayoutAnchoredSystemItem
+            if !item.canBeHidden, !isMacOS27LayoutAnchor {
                 return false
             }
             if item.isSystemClone {
@@ -1876,9 +1877,9 @@ extension MenuBarItemManager {
                 context.cache[target].append(snapshot)
             }
 
-            // Apply the user's recorded intra-section order (from layout-bar
-            // drags). Visible order records only movable third-party items;
-            // Apple/system anchors keep their live AX slots.
+            // Apply intra-section order. On macOS 27 the visible section uses
+            // fresh AX geometry so fixed system anchors still appear in their
+            // live slots, disabled but visible.
             for section in MenuBarSection.Name.allCases {
                 context.cache[section] = hider.ordered(context.cache[section], in: section)
             }
