@@ -197,9 +197,8 @@ final class MenuBarSection {
 
     /// A Boolean value that indicates whether the section is hidden.
     var isHidden: Bool {
-        // macOS 27 cannot hide items; every section is always shown.
         guard Constants.supportsSectionHiding else {
-            return false
+            return appState?.menuBarManager.simpleItemHider?.isSectionHidden(name) ?? true
         }
         if useIceBar {
             if controlItem.state == .showSection {
@@ -231,6 +230,20 @@ final class MenuBarSection {
         if case .visible = name {
             // The visible section should always be enabled.
             return true
+        }
+        // macOS 27: the control items are zero-width and may not be "added to
+        // the menu bar", but the layout bars still drive section assignment for
+        // the assertion-based hiding. Enable Hidden always; Always-Hidden only
+        // when the user opted into it.
+        if !Constants.supportsSectionHiding {
+            switch name {
+            case .visible:
+                return true
+            case .hidden:
+                return true
+            case .alwaysHidden:
+                return appState?.settings.advanced.enableAlwaysHiddenSection ?? false
+            }
         }
         return controlItem.isAddedToMenuBar
     }
@@ -321,6 +334,24 @@ final class MenuBarSection {
 
         menuBarManager.updateLastShowTimestamp()
 
+        guard Constants.supportsSectionHiding else {
+            menuBarManager.simpleItemHider?.show(name)
+            switch name {
+            case .visible, .hidden:
+                for section in menuBarManager.sections {
+                    section.desiredState = section.name == .alwaysHidden ? .hideSection : .showSection
+                    section.updateControlItemState(for: nil)
+                }
+            case .alwaysHidden:
+                for section in menuBarManager.sections {
+                    section.desiredState = .showSection
+                    section.updateControlItemState(for: nil)
+                }
+            }
+            startRehideChecks()
+            return
+        }
+
         guard controlItem.isAddedToMenuBar else {
             return
         }
@@ -407,11 +438,21 @@ final class MenuBarSection {
 
     /// Hides the section.
     func hide() {
-        guard Constants.supportsSectionHiding else {
-            diagLog.warning("Section hiding is currently unavailable on macOS 27")
+        guard let menuBarManager, !isHidden else {
             return
         }
-        guard let menuBarManager, !isHidden else {
+
+        if !Constants.supportsSectionHiding {
+            menuBarManager.simpleItemHider?.hideRevealedSections()
+            menuBarManager.iceBarPanel.close()
+            menuBarManager.showOnHoverAllowed = true
+
+            for section in menuBarManager.sections {
+                section.desiredState = .hideSection
+                section.updateControlItemState(for: nil)
+            }
+
+            stopRehideChecks()
             return
         }
 
