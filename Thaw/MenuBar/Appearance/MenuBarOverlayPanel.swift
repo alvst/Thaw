@@ -723,6 +723,13 @@ private final class MenuBarOverlayPanelContentView: NSView {
             cachedItemWindows = []
             return
         }
+        // macOS 27: status items are not enumerable as CGS windows, so this
+        // always returns []. Skip the dead CGS calls (and their log spam) and
+        // set [] directly — behavior-identical, just without the round-trips.
+        if #available(macOS 27, *) {
+            cachedItemWindows = []
+            return
+        }
         cachedItemWindows = MenuBarItem.getMenuBarItemWindows(
             on: screen.displayID,
             option: .onScreen
@@ -735,6 +742,15 @@ private final class MenuBarOverlayPanelContentView: NSView {
     /// `applicationMenuFrame` and prevents the trailing shape from being drawn
     /// with a stale (transitional) icon layout immediately after an app switch.
     private func scheduleItemWindowsConfirmation(for screen: NSScreen) {
+        // macOS 27: item windows aren't enumerable (always []), so the
+        // confirmation poll can never produce data — skip it to avoid 10 dead
+        // CGS reads (and their log spam) per app switch.
+        if #available(macOS 27, *) {
+            itemWindowsConfirmTask?.cancel()
+            itemWindowsConfirmTask = nil
+            cachedItemWindows = []
+            return
+        }
         // Hoist displayID before entering the Task so that no AppKit
         // (NSScreen) access occurs off the main thread.
         let displayID = screen.displayID

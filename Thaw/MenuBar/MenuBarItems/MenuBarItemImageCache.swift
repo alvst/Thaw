@@ -605,6 +605,18 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
 
             let scale = screen.backingScaleFactor
 
+            // macOS 27: items are composited inside MenuBarAgent and have
+            // synthetic windowIDs with no CGS window, so the CGS/SkyLight
+            // refreshImages path (Bridging.getWindowBounds → cgsGetScreenRectForWindow)
+            // fails for every item — pure spam, never updating anything. The only
+            // capture that works is the AX-bounds hosting-window screenshot, which
+            // updateCacheWithoutChecks already routes to (axBoundsCapture). Use it
+            // here so the periodic refresh actually refreshes on 27.
+            if #available(macOS 27, *) {
+                await updateCacheWithoutChecks(sections: sections)
+                continue
+            }
+
             // Partition by capture path: visible items refresh via SCK
             // (leak-free); hidden + always-hidden items refresh via SkyLight,
             // batched into a single call per tick to amortize the irreducible
@@ -1405,10 +1417,25 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
         }
 
         let scale = screen.backingScaleFactor
-        MenuBarItemImageCache.diagLog.notice("updateCacheWithoutChecks: displayID=\(screen.displayID) backingScaleFactor=\(Double(scale)) hasNotch=\(screen.hasNotch) menuBarHeight=\(Double(screen.getMenuBarHeightEstimate())) sections=\(sections.map(\.logString))")
+
+        // macOS 27: only the visible section is actually on screen. Hidden and
+        // always-hidden items are concealed by the visibility-restriction
+        // assertion, so capturing them would crop the live MenuBarAgent hosting
+        // window at their *stale* pre-conceal bounds and grab whatever item now
+        // occupies that region — producing wrong/garbled icons in the layout UI.
+        // Skip them: their last-good image (captured while visible) is preserved
+        // by the valid-tag cleanup below.
+        let sectionsToCapture: [MenuBarSection.Name]
+        if #available(macOS 27, *) {
+            sectionsToCapture = sections.filter { $0 == .visible }
+        } else {
+            sectionsToCapture = sections
+        }
+
+        MenuBarItemImageCache.diagLog.notice("updateCacheWithoutChecks: displayID=\(screen.displayID) backingScaleFactor=\(Double(scale)) hasNotch=\(screen.hasNotch) menuBarHeight=\(Double(screen.getMenuBarHeightEstimate())) sections=\(sectionsToCapture.map(\.logString))")
         var newImages = [MenuBarItemTag: CapturedImage]()
 
-        for section in sections {
+        for section in sectionsToCapture {
             guard !Task.isCancelled else {
                 MenuBarItemImageCache.diagLog.debug("updateCacheWithoutChecks: cancelled before capturing \(section.logString)")
                 return

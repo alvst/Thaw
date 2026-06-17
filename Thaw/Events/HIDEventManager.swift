@@ -746,6 +746,13 @@ extension HIDEventManager {
     // MARK: Handle Show On Click
 
     private func handleShowOnClick(appState: AppState, screen: NSScreen, clickLocation: CGPoint, modifierFlags: NSEvent.ModifierFlags, isDoubleClick: Bool = false) {
+        // macOS 27: plain clicks are handled by the control item menu, and there
+        // is no legacy off-screen reflow to reveal. Running this here only calls
+        // no-op section.show()/toggle(), burning the main thread on every click.
+        // Skip it entirely.
+        guard Constants.supportsSectionHiding else {
+            return
+        }
         guard appState.settings.general.showOnClick else {
             return
         }
@@ -957,6 +964,12 @@ extension HIDEventManager {
         appState: AppState,
         screen: NSScreen
     ) {
+        // macOS 27: assigned hidden items are kept concealed by SimpleItemHider.
+        // Nothing is temporarily shown by this event path, so the legacy
+        // section.hide() call is a no-op that only spams the log.
+        guard Constants.supportsSectionHiding else {
+            return
+        }
         guard
             appState.settings.general.autoRehide,
             case .smart = appState.settings.general.rehideStrategy
@@ -986,7 +999,11 @@ extension HIDEventManager {
 
         Task {
             // Give the window under the mouse a chance to focus.
-            try await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
 
             // Don't bother checking the window if the click caused
             // a space change.
@@ -1310,6 +1327,13 @@ extension HIDEventManager {
     // MARK: Handle Show On Hover
 
     private func handleShowOnHover(appState: AppState, screen: NSScreen) {
+        // macOS 27: there is no off-screen section to reveal/hide on hover.
+        // This runs on the throttled mouse-moved tap, so leaving it active means
+        // every mouse move near the menu bar schedules no-op section work and
+        // burns the main thread. Skip it.
+        guard Constants.supportsSectionHiding else {
+            return
+        }
         // Make sure the "ShowOnHover" feature is enabled and allowed.
         guard
             appState.settings.general.showOnHover,
@@ -1474,6 +1498,11 @@ extension HIDEventManager {
         appState: AppState,
         screen: NSScreen
     ) {
+        // macOS 27: no off-screen section to reveal/hide; section.show()/hide()
+        // here are no-ops. Skip so scrolling over the menu bar doesn't spam.
+        guard Constants.supportsSectionHiding else {
+            return
+        }
         guard
             appState.settings.general.showOnScroll,
             isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen),

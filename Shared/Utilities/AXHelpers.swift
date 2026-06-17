@@ -26,7 +26,17 @@ enum AXHelpers {
     }
 
     static func application(for runningApp: NSRunningApplication) -> Application? {
-        queue.sync { Application(runningApp) }
+        queue.sync {
+            let app = Application(runningApp)
+            // Bound every AX round trip to this app. Without a timeout,
+            // AXUIElementCopyAttributeValue blocks on mach_msg until the target
+            // app's accessibility server replies — an unresponsive app would
+            // otherwise stall menu bar enumeration indefinitely.
+            if let app {
+                AXUIElementSetMessagingTimeout(app.element, 0.25)
+            }
+            return app
+        }
     }
 
     static func extrasMenuBar(for app: Application) -> UIElement? {
@@ -70,12 +80,6 @@ enum AXHelpers {
     /// the macOS 27 Accessibility-based enumeration.
     static func identifier(for element: UIElement) -> String? {
         queue.sync { try? element.attribute(.identifier) }
-    }
-
-    /// The element's `AXSubrole`, when present. Used to distinguish menu bar
-    /// status items from incidental children (popovers, menus) on macOS 27.
-    static func subrole(for element: UIElement) -> String? {
-        queue.sync { try? element.attribute(.subrole) }
     }
 
     static func pid(for element: UIElement) -> pid_t? {
