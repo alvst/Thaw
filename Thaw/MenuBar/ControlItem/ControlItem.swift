@@ -46,7 +46,7 @@ final class ControlItem {
                     // macOS 27 no longer reflows over-wide status items, so an
                     // expanded divider just overflows off the right edge and
                     // confuses section classification instead of hiding anything.
-                    // Keep it at standard width there (hiding is unsupported).
+                    // Keep it at standard width there.
                     Constants.supportsSectionHiding ? Lengths.expanded : Lengths.standard
                 }
             }
@@ -129,6 +129,7 @@ final class ControlItem {
             let isSectionDivider = ControlItemDefaults.isSectionDivider(autosaveName: autosaveName)
             let cached = ControlItemDefaults[.preferredPosition, autosaveName]
             NSStatusBar.system.removeStatusItem(statusItem)
+            ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: autosaveName)
             if !isSectionDivider {
                 ControlItemDefaults[.preferredPosition, autosaveName] = cached
             }
@@ -369,7 +370,11 @@ final class ControlItem {
                 hideIceIconCompletely()
                 return
             }
+            ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: identifier.rawValue)
+            addToMenuBar()
             updateStatusItemVisibility(true)
+            button.isEnabled = true
+            button.alphaValue = 1
             button.appearsDisabled = false
 
             let icon = appState.settings.general.iceIcon
@@ -541,6 +546,7 @@ final class ControlItem {
         let isSectionDivider = (identifier == .hidden || identifier == .alwaysHidden)
         let cached = ControlItemDefaults[.preferredPosition, autosaveName]
         statusItem.isVisible = false
+        ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: autosaveName)
         if !isSectionDivider {
             ControlItemDefaults[.preferredPosition, autosaveName] = cached
         }
@@ -560,6 +566,7 @@ final class ControlItem {
 
     /// Updates the status item's visibility without clearing its preferred position.
     private func setIceIconDisplayed(_ shouldShow: Bool) {
+        ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: identifier.rawValue)
         statusItem.isVisible = true
         if shouldShow {
             updateStatusItem()
@@ -636,14 +643,6 @@ final class ControlItem {
                     {
                         section.toggle()
                     }
-                    return
-                }
-
-                // macOS 27 has no hidden section to reveal, so a plain click on
-                // the icon opens the menu (Settings, Search, …) like a typical
-                // menu bar app instead of toggling nothing.
-                if !Constants.supportsSectionHiding {
-                    showMenu()
                     return
                 }
 
@@ -799,10 +798,11 @@ final class ControlItem {
 
         let quitItem = NSMenuItem(
             title: String(localized: "Quit \(Constants.displayName)"),
-            action: #selector(NSApp.terminate),
+            action: #selector(quitFromMenu),
             keyEquivalent: "q"
         )
         quitItem.keyEquivalentModifierMask = .command
+        quitItem.target = self
         quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Quit")
         menu.addItem(quitItem)
 
@@ -818,6 +818,25 @@ final class ControlItem {
         menu.addItem(restartItem)
 
         return menu
+    }
+
+    /// Terminates the app, deferred to the next default-mode run loop pass.
+    ///
+    /// This menu item's action fires inside the status-item menu's
+    /// event-tracking run loop. Calling `NSApp.terminate` directly from there
+    /// can leave the `.terminateLater` async reply (scheduled by
+    /// `applicationShouldTerminate`) unable to drain while the run loop is still
+    /// in tracking mode, so the process never finishes — the exact "exit sent
+    /// from the wrong run-loop mode" hang. Scheduling in `.default` runs
+    /// terminate after menu tracking unwinds; mirrors
+    /// `MenuBarManager.quitFromSecondaryContextMenu`. Especially important on
+    /// macOS 27, where this menu is the only way to quit.
+    @objc private func quitFromMenu() {
+        RunLoop.main.perform(inModes: [.default]) {
+            MainActor.assumeIsolated {
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     @objc private func restartFromMenu() {
@@ -956,6 +975,22 @@ enum ControlItemDefaults {
         if ControlItemDefaults[.visibleCC, autosaveName] == nil {
             ControlItemDefaults[.visibleCC, autosaveName] = true
         }
+        restoreVisibilityIfNeeded(autosaveName: autosaveName)
+    }
+
+    /// The visible Thaw control item must always be registered with
+    /// MenuBarAgent. User preference hides it by setting length to zero, not by
+    /// persisting `VisibleCC = 0`. macOS 27 removal can leave that persisted bit
+    /// false, making the app unreachable on the next launch.
+    static func restoreVisibilityIfNeeded(autosaveName: String) {
+        guard autosaveName == ControlItem.Identifier.visible.rawValue else {
+            return
+        }
+        guard #available(macOS 27, *) else {
+            return
+        }
+        ControlItemDefaults[.visible, autosaveName] = true
+        ControlItemDefaults[.visibleCC, autosaveName] = true
     }
 
     /// Resets chevron section divider positions to their defaults.
