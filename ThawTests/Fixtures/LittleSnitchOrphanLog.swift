@@ -26,7 +26,32 @@
 /// Thaw does not log the desired visible set (only desiredHidden / desiredAH),
 /// which is why the harness reconstructs it; see the harness for how.
 enum LittleSnitchOrphanLog {
-    static let text = """
+    /// The generic orphan's hosting-process namespace, per OS: Control Center on
+    /// macOS 26, MenuBarAgent on macOS 27+ (status items moved into MenuBarAgent,
+    /// so `MenuBarItemTag.isControlCenterGenericItem` keys off it there instead).
+    static var hostNamespace: String {
+        if #available(macOS 27, *) {
+            return "com.apple.MenuBarAgent"
+        } else {
+            return "com.apple.controlcenter"
+        }
+    }
+
+    /// The Little Snitch orphan's unique identifier for the running OS.
+    static var orphanUID: String { "\(hostNamespace):Item-0" }
+
+    /// The fixture log. Captured on macOS 26 (Control Center hosting); on macOS
+    /// 27 the orphan's namespace is rewritten to MenuBarAgent so the replay stays
+    /// faithful to the running OS's hosting process. Everything else is verbatim.
+    static var text: String {
+        guard #available(macOS 27, *) else { return rawText }
+        return rawText.replacingOccurrences(
+            of: "com.apple.controlcenter:Item-0",
+            with: "com.apple.MenuBarAgent:Item-0"
+        )
+    }
+
+    private static let rawText = """
     2026-05-29 17:13:15.062 [WARNING] [MenuBarItemManager] Missing sourcePID for <com.apple.controlcenter:Item-0 (windowID: 64)>
     2026-05-29 17:13:37.430 [DEBUG] [MenuBarItemManager] applyProfileLayout: current visible section has 3 items: ["com.stonerl.Thaw:Thaw.ControlItem.Visible", "com.apple.controlcenter:Item-0", "com.rogueamoeba.soundsource:SSMainAppMenuIcon"]
     2026-05-29 17:13:37.430 [DEBUG] [MenuBarItemManager] applyProfileLayout: current hidden section has 5 items: ["com.microsoft.OneDrive-mac:Item-0", "app.updatest.Updatest:Item-0", "org.eduvpn.app:Item-0", "com.wireguard.macos:Item-0", "com.apple.systemuiserver:com.apple.menuextra.TimeMachine"]

@@ -34,7 +34,8 @@ import XCTest
 /// log), and testBuggyCycleDoesNotPlanMoveForUnresolvedOrphan is the regression
 /// lock that fails before the fix and passes after it.
 final class ProfileLayoutLogReplayTests: XCTestCase {
-    private let orphanUID = "com.apple.controlcenter:Item-0"
+    // Control Center on macOS 26, MenuBarAgent on macOS 27+ — see the fixture.
+    private let orphanUID = LittleSnitchOrphanLog.orphanUID
 
     // MARK: Parser characterization
 

@@ -81,3 +81,45 @@ final class MenuBarTestFixturesTests: XCTestCase {
         XCTAssertNotEqual(pair.hidden.windowID, pair.alwaysHidden?.windowID)
     }
 }
+
+// MARK: - ControlItemDefaults Tests
+
+final class ControlItemDefaultsTests: XCTestCase {
+    private let visibleAutosaveName = ControlItem.Identifier.visible.rawValue
+
+    override func tearDown() {
+        ControlItemDefaults[.visible, visibleAutosaveName] = nil
+        ControlItemDefaults[.visibleCC, visibleAutosaveName] = nil
+        super.tearDown()
+    }
+
+    func testRestoreVisibilityForVisibleControlItemRepairsPersistedHiddenStateOnMacOS27() {
+        ControlItemDefaults[.visible, visibleAutosaveName] = false
+        ControlItemDefaults[.visibleCC, visibleAutosaveName] = false
+
+        ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: visibleAutosaveName)
+
+        if #available(macOS 27, *) {
+            XCTAssertEqual(ControlItemDefaults[.visible, visibleAutosaveName], true)
+            XCTAssertEqual(ControlItemDefaults[.visibleCC, visibleAutosaveName], true)
+        } else {
+            XCTAssertEqual(ControlItemDefaults[.visible, visibleAutosaveName], false)
+            XCTAssertEqual(ControlItemDefaults[.visibleCC, visibleAutosaveName], false)
+        }
+    }
+
+    func testRestoreVisibilityDoesNotChangeSectionDividerDefaults() {
+        let hiddenAutosaveName = ControlItem.Identifier.hidden.rawValue
+        ControlItemDefaults[.visible, hiddenAutosaveName] = false
+        ControlItemDefaults[.visibleCC, hiddenAutosaveName] = false
+        defer {
+            ControlItemDefaults[.visible, hiddenAutosaveName] = nil
+            ControlItemDefaults[.visibleCC, hiddenAutosaveName] = nil
+        }
+
+        ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: hiddenAutosaveName)
+
+        XCTAssertEqual(ControlItemDefaults[.visible, hiddenAutosaveName], false)
+        XCTAssertEqual(ControlItemDefaults[.visibleCC, hiddenAutosaveName], false)
+    }
+}

@@ -7,6 +7,7 @@
 //  Licensed under the GNU GPLv3
 
 @testable import Thaw
+import CoreGraphics
 import XCTest
 
 // MARK: - MenuBarItemTag.Namespace Tests
@@ -296,6 +297,31 @@ final class MenuBarItemTagTests: XCTestCase {
         XCTAssertTrue(tag.isMovable)
     }
 
+    func testMenuBarAgentKnownModulesAreAnchoredOnMacOS27() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        for title in MenuBarItemTag.menuBarAgentAnchoredModuleTitles {
+            let tag = MenuBarItemTag(namespace: .menuBarAgent, title: title)
+
+            XCTAssertTrue(tag.isLayoutAnchoredSystemItem, title)
+            XCTAssertFalse(tag.isMovable, title)
+            XCTAssertFalse(tag.canBeHidden, title)
+        }
+    }
+
+    func testUnknownMenuBarAgentItemIsNotAnchored() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let tag = MenuBarItemTag(namespace: .menuBarAgent, title: "Item-0")
+
+        XCTAssertFalse(tag.isLayoutAnchoredSystemItem)
+        XCTAssertTrue(tag.isMovable)
+    }
+
     // MARK: - Can Be Hidden Tests
 
     func testVisibleControlItemCannotBeHidden() {
@@ -364,8 +390,16 @@ final class MenuBarItemTagTests: XCTestCase {
     // MARK: - BentoBox Tests
 
     func testBentoBoxDetection() {
+        // The BentoBox is owned by the menu bar hosting process: Control Center
+        // on macOS 26, MenuBarAgent on macOS 27+.
+        let hostingNamespace: MenuBarItemTag.Namespace
+        if #available(macOS 27, *) {
+            hostingNamespace = .menuBarAgent
+        } else {
+            hostingNamespace = .controlCenter
+        }
         let tag = MenuBarItemTag(
-            namespace: .controlCenter,
+            namespace: hostingNamespace,
             title: "BentoBox-0"
         )
 
@@ -553,5 +587,349 @@ final class MenuBarItemTagTests: XCTestCase {
 
     func testControlItemsContainsAlwaysHiddenControlItem() {
         XCTAssertTrue(MenuBarItemTag.controlItems.contains(.alwaysHiddenControlItem))
+    }
+}
+
+// MARK: - macOS 27 Layout Anchor Tests
+
+final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
+    @MainActor
+    func testVisibleOrderingMovesMenuBarAgentItemsToEnd() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let alpha = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 0, windowID: 10)
+        let wifi = systemItem(title: "WiFi", x: 24, windowID: 11)
+        let beta = appItem(bundleID: "com.example.beta", title: "Beta", x: 48, windowID: 12)
+        let gamma = appItem(bundleID: "com.example.gamma", title: "Gamma", x: 72, windowID: 13)
+
+        let ordered = SimpleItemHider.orderedItems(
+            [alpha, wifi, beta, gamma],
+            in: .visible,
+            using: [gamma.uniqueIdentifier, beta.uniqueIdentifier, alpha.uniqueIdentifier]
+        )
+
+        XCTAssertEqual(
+            ordered.map(\.uniqueIdentifier),
+            [gamma.uniqueIdentifier, beta.uniqueIdentifier, alpha.uniqueIdentifier, wifi.uniqueIdentifier]
+        )
+    }
+
+    @MainActor
+    func testVisibleOrderingMovesMenuBarAgentItemsToEndWithoutSavedOrder() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let alpha = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 0, windowID: 110)
+        let wifi = systemItem(title: "WiFi", x: 24, windowID: 111)
+        let beta = appItem(bundleID: "com.example.beta", title: "Beta", x: 48, windowID: 112)
+
+        let ordered = SimpleItemHider.orderedItems(
+            [alpha, wifi, beta],
+            in: .visible,
+            using: []
+        )
+
+        XCTAssertEqual(
+            ordered.map(\.uniqueIdentifier),
+            [alpha.uniqueIdentifier, beta.uniqueIdentifier, wifi.uniqueIdentifier]
+        )
+    }
+
+    @MainActor
+    func testVisibleOrderingKeepsMenuBarAgentTrailingBlockInLiveOrder() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let alpha = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 0, windowID: 14)
+        let beta = appItem(bundleID: "com.example.beta", title: "Beta", x: 24, windowID: 15)
+        let wifi = systemItem(title: "WiFi", x: 48, windowID: 16)
+        let gamma = appItem(bundleID: "com.example.gamma", title: "Gamma", x: 72, windowID: 17)
+        let delta = appItem(bundleID: "com.example.delta", title: "Delta", x: 96, windowID: 18)
+        let controlCenter = systemItem(title: "BentoBox-0", x: 120, windowID: 19)
+        let unknownModule = systemItem(title: "Item-0", x: 144, windowID: 20)
+
+        let ordered = SimpleItemHider.orderedItems(
+            [alpha, beta, wifi, gamma, delta, controlCenter, unknownModule],
+            in: .visible,
+            using: [
+                delta.uniqueIdentifier,
+                gamma.uniqueIdentifier,
+                unknownModule.uniqueIdentifier,
+                controlCenter.uniqueIdentifier,
+                wifi.uniqueIdentifier,
+                beta.uniqueIdentifier,
+                alpha.uniqueIdentifier,
+            ]
+        )
+
+        XCTAssertEqual(
+            ordered.map(\.uniqueIdentifier),
+            [
+                delta.uniqueIdentifier,
+                gamma.uniqueIdentifier,
+                beta.uniqueIdentifier,
+                alpha.uniqueIdentifier,
+                wifi.uniqueIdentifier,
+                controlCenter.uniqueIdentifier,
+                unknownModule.uniqueIdentifier,
+            ]
+        )
+    }
+
+    @MainActor
+    func testVisibleOrderingIgnoresStaleSystemOrderEntries() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let alpha = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 0, windowID: 20)
+        let clock = systemItem(title: "Clock", x: 24, windowID: 21)
+        let beta = appItem(bundleID: "com.example.beta", title: "Beta", x: 48, windowID: 22)
+
+        let ordered = SimpleItemHider.orderedItems(
+            [alpha, clock, beta],
+            in: .visible,
+            using: [clock.uniqueIdentifier, beta.uniqueIdentifier, alpha.uniqueIdentifier]
+        )
+
+        XCTAssertEqual(
+            ordered.map(\.uniqueIdentifier),
+            [beta.uniqueIdentifier, alpha.uniqueIdentifier, clock.uniqueIdentifier]
+        )
+    }
+
+    @MainActor
+    func testPersistableVisibleOrderExcludesAnchoredSystemItems() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let alpha = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 0, windowID: 30)
+        let clock = systemItem(title: "Clock", x: 24, windowID: 31)
+        let unknownModule = systemItem(title: "Item-0", x: 36, windowID: 33)
+        let beta = appItem(bundleID: "com.example.beta", title: "Beta", x: 48, windowID: 32)
+
+        let identifiers = SimpleItemHider.persistableOrderIdentifiers(
+            from: [alpha, clock, unknownModule, beta],
+            in: .visible
+        )
+
+        XCTAssertEqual(identifiers, [alpha.uniqueIdentifier, beta.uniqueIdentifier])
+    }
+
+    @MainActor
+    func testTemporaryHiddenRevealKeepsAlwaysHiddenConcealed() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider reveal is macOS 27-specific")
+        }
+
+        let assignment: [String: MenuBarSection.Name] = [
+            "com.example.hidden:Hidden": .hidden,
+            "com.example.always:Always": .alwaysHidden,
+        ]
+
+        let effective = SimpleItemHider.effectiveSectionAssignment(
+            assignment,
+            revealing: .hidden
+        )
+
+        XCTAssertEqual(effective, ["com.example.always:Always": .alwaysHidden])
+    }
+
+    @MainActor
+    func testTemporaryAlwaysHiddenRevealAllowsAllAssignedItems() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider reveal is macOS 27-specific")
+        }
+
+        let assignment: [String: MenuBarSection.Name] = [
+            "com.example.hidden:Hidden": .hidden,
+            "com.example.always:Always": .alwaysHidden,
+        ]
+
+        let effective = SimpleItemHider.effectiveSectionAssignment(
+            assignment,
+            revealing: .alwaysHidden
+        )
+
+        XCTAssertTrue(effective.isEmpty)
+    }
+
+    @MainActor
+    func testEffectiveAssignmentDropsThawOwnedEntries() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider reveal is macOS 27-specific")
+        }
+
+        let thawID = "\(Constants.bundleIdentifier):Thaw.ControlItem.Visible"
+        let genericThawID = "\(Constants.bundleIdentifier):Item-0"
+        let assignment: [String: MenuBarSection.Name] = [
+            thawID: .alwaysHidden,
+            genericThawID: .hidden,
+            "com.example.hidden:Hidden": .hidden,
+        ]
+
+        let effective = SimpleItemHider.effectiveSectionAssignment(
+            assignment,
+            revealing: nil
+        )
+
+        XCTAssertEqual(effective, ["com.example.hidden:Hidden": .hidden])
+    }
+
+    @MainActor
+    func testPersistableVisibleOrderExcludesThawOwnedItems() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider reveal is macOS 27-specific")
+        }
+
+        let thaw = item(
+            tag: MenuBarItemTag(namespace: .thaw, title: "Thaw.ControlItem.Visible", windowID: 90),
+            x: 0,
+            windowID: 90
+        )
+        let app = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 24, windowID: 91)
+
+        let identifiers = SimpleItemHider.persistableOrderIdentifiers(
+            from: [thaw, app],
+            in: .visible
+        )
+
+        XCTAssertEqual(identifiers, [app.uniqueIdentifier])
+    }
+
+    @MainActor
+    func testGenericThawItemIsProtectedFromAssignmentHiding() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider protection is macOS 27-specific")
+        }
+
+        let genericThaw = item(
+            tag: MenuBarItemTag(namespace: .thaw, title: "Item-0", windowID: 94),
+            x: 0,
+            windowID: 94
+        )
+        let app = appItem(bundleID: "com.example.alpha", title: "Item-0", x: 24, windowID: 95)
+
+        XCTAssertTrue(SimpleItemHider.isProtectedAssignmentItem(genericThaw))
+        XCTAssertFalse(SimpleItemHider.isProtectedAssignmentItem(app))
+    }
+
+    @MainActor
+    func testAssessmentModeProtectedBundlesIncludeMainApp() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("Assessment Mode hiding is macOS 27-specific")
+        }
+
+        XCTAssertTrue(AssessmentModeBackend.protectedBundleIDs.contains(Constants.bundleIdentifier))
+    }
+
+    @MainActor
+    func testTemporaryRevealHiddenStateMatchesSectionControls() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("SimpleItemHider reveal is macOS 27-specific")
+        }
+
+        XCTAssertTrue(SimpleItemHider.isSectionHidden(.visible, revealedSection: nil))
+        XCTAssertTrue(SimpleItemHider.isSectionHidden(.hidden, revealedSection: nil))
+        XCTAssertTrue(SimpleItemHider.isSectionHidden(.alwaysHidden, revealedSection: nil))
+
+        XCTAssertFalse(SimpleItemHider.isSectionHidden(.visible, revealedSection: .hidden))
+        XCTAssertFalse(SimpleItemHider.isSectionHidden(.hidden, revealedSection: .hidden))
+        XCTAssertTrue(SimpleItemHider.isSectionHidden(.alwaysHidden, revealedSection: .hidden))
+
+        XCTAssertFalse(SimpleItemHider.isSectionHidden(.visible, revealedSection: .alwaysHidden))
+        XCTAssertFalse(SimpleItemHider.isSectionHidden(.hidden, revealedSection: .alwaysHidden))
+        XCTAssertFalse(SimpleItemHider.isSectionHidden(.alwaysHidden, revealedSection: .alwaysHidden))
+    }
+
+    @MainActor
+    func testSectionAssignmentSanitizerDropsThawControlItems() {
+        let visibleControlID = "\(MenuBarItemTag.Namespace.thaw):\(ControlItem.Identifier.visible.rawValue)"
+        let hiddenControlID = "\(MenuBarItemTag.Namespace.thaw):\(ControlItem.Identifier.hidden.rawValue)"
+        let genericThawID = "\(MenuBarItemTag.Namespace.thaw):Item-0"
+        let rawVisibleControlID = ControlItem.Identifier.visible.rawValue
+        let appID = "com.example.alpha:Alpha"
+        let visibleAppID = "com.example.beta:Beta"
+
+        let sanitized = SimpleItemHider.sanitizedSectionAssignment([
+            appID: .hidden,
+            hiddenControlID: .alwaysHidden,
+            genericThawID: .hidden,
+            rawVisibleControlID: .hidden,
+            visibleAppID: .visible,
+            visibleControlID: .hidden,
+        ])
+
+        XCTAssertEqual(sanitized, [appID: .hidden])
+    }
+
+    func testMacOS27LiveOrderRequiresFreshAXAdjacency() {
+        let alphaTag = MenuBarItemTag.appItem(bundleID: "com.example.alpha", title: "Alpha", windowID: 40)
+        let betaTag = MenuBarItemTag.appItem(bundleID: "com.example.beta", title: "Beta", windowID: 41)
+        let gammaTag = MenuBarItemTag.appItem(bundleID: "com.example.gamma", title: "Gamma", windowID: 42)
+        let alpha = item(tag: alphaTag, x: 0, windowID: 40)
+        let beta = item(tag: betaTag, x: 24, windowID: 41)
+        let gamma = item(tag: gammaTag, x: 48, windowID: 42)
+
+        XCTAssertFalse(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesDestination(
+                items: [alpha, beta, gamma],
+                item: alpha,
+                destination: .leftOfItem(gamma)
+            )
+        )
+
+        let movedBeta = item(tag: betaTag, x: 0, windowID: 41)
+        let movedAlpha = item(tag: alphaTag, x: 24, windowID: 40)
+        let movedGamma = item(tag: gammaTag, x: 48, windowID: 42)
+        XCTAssertTrue(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesDestination(
+                items: [movedBeta, movedAlpha, movedGamma],
+                item: alpha,
+                destination: .leftOfItem(gamma)
+            )
+        )
+    }
+
+    private func appItem(
+        bundleID: String,
+        title: String,
+        x: CGFloat,
+        windowID: CGWindowID
+    ) -> MenuBarItem {
+        item(
+            tag: .appItem(bundleID: bundleID, title: title, windowID: windowID),
+            x: x,
+            windowID: windowID
+        )
+    }
+
+    private func systemItem(
+        title: String,
+        x: CGFloat,
+        windowID: CGWindowID
+    ) -> MenuBarItem {
+        item(
+            tag: MenuBarItemTag(namespace: .menuBarAgent, title: title, windowID: windowID),
+            x: x,
+            windowID: windowID
+        )
+    }
+
+    private func item(
+        tag: MenuBarItemTag,
+        x: CGFloat,
+        windowID: CGWindowID
+    ) -> MenuBarItem {
+        MenuBarItem.fixture(
+            tag: tag,
+            windowID: windowID,
+            bounds: CGRect(x: x, y: 0, width: 20, height: 22)
+        )
     }
 }

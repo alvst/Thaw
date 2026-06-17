@@ -65,8 +65,8 @@ struct SettingsView: View {
     }
 
     /// A yellow warning pill shown in the toolbar on macOS 27, where menu bar
-    /// item support is experimental (hiding is unavailable and some features
-    /// may be unreliable).
+    /// item support is experimental (hiding works through a private system API
+    /// and some features may be unreliable).
     private var experimentalMacOS27Pill: some View {
         HStack(spacing: 5) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -78,7 +78,7 @@ struct SettingsView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(Capsule().fill(.yellow.opacity(0.15)))
-        .help("Menu bar support on macOS 27 is experimental: hiding is unavailable and some features may be unreliable.")
+        .help("Menu bar support on macOS 27 is experimental: hiding works through a private system API and some features may be unreliable.")
     }
 
     private var sidebar: some View {
