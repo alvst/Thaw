@@ -24,13 +24,12 @@ import Cocoa
 /// published by `MenuBarAgent` itself. This removes the need for the macOS 26
 /// marker-pair / spatial source-PID resolution entirely.
 ///
-/// This first cut is read-only: it produces ``MenuBarItem`` values so the layout
-/// UI populates and Thaw's own control items are recognized. Moving/hiding items
-/// and per-item image capture are tracked as follow-ups (items are no longer
-/// independent windows, so the CGS move and `SLWindowListCreateImageFromArray`
-/// capture paths do not apply on macOS 27).
+/// This provider is intentionally read-only: it produces ``MenuBarItem`` values
+/// so the layout UI, reordering verification, and capture paths can share the
+/// same AX-derived identity/order source. Reordering, hiding, and thumbnails are
+/// handled by the macOS 27-specific callers because items are no longer
+/// independent windows.
 @available(macOS 27, *)
-@MainActor
 enum MenuBarItemAXProvider {
     private static let diagLog = DiagLog(category: "MenuBarItemAXProvider")
 
@@ -186,18 +185,22 @@ enum MenuBarItemAXProvider {
     // MARK: Helpers
 
     /// Maps a running application to the namespace used for its items.
-    private static func namespace(for app: NSRunningApplication) -> MenuBarItemTag.Namespace {
-        if let bundleID = app.bundleIdentifier {
-            switch bundleID {
-            case "com.apple.MenuBarAgent":
-                return .menuBarAgent
-            case Constants.bundleIdentifier:
-                return .thaw
-            default:
-                return .string(bundleID)
-            }
+    static func namespace(forBundleIdentifier bundleID: String?, localizedName: String? = nil) -> MenuBarItemTag.Namespace {
+        guard let bundleID else {
+            return .optional(localizedName)
         }
-        return .optional(app.localizedName)
+        switch bundleID {
+        case "com.apple.MenuBarAgent":
+            return .menuBarAgent
+        case Constants.bundleIdentifier:
+            return .thaw
+        default:
+            return .string(bundleID)
+        }
+    }
+
+    private static func namespace(for app: NSRunningApplication) -> MenuBarItemTag.Namespace {
+        namespace(forBundleIdentifier: app.bundleIdentifier, localizedName: app.localizedName)
     }
 
     /// Produces a deterministic window identifier for an AX item.

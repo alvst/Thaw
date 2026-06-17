@@ -487,7 +487,15 @@ extension MenuBarItem {
         // CGS path depends on. Enumerate through the Accessibility tree instead,
         // which still exposes every item with direct source attribution.
         if #available(macOS 27, *) {
-            let items = MenuBarItemAXProvider.menuBarItems(on: display, option: option)
+            // The AX walk makes a synchronous round trip to every running app's
+            // accessibility server. Run it off the main actor so an unresponsive
+            // app can't block `mach_msg` on the main thread and freeze the whole
+            // UI (settings tabs included). The work itself is already serialized
+            // onto AXHelpers' background queue; this just keeps the *caller* — the
+            // main thread — free to suspend instead of blocking.
+            let items = await Task.detached(priority: .userInitiated) {
+                MenuBarItemAXProvider.menuBarItems(on: display, option: option)
+            }.value
             diagLog.debug("getMenuBarItems: returned \(items.count) items (AX path)")
             return items
         }
