@@ -297,17 +297,49 @@ final class MenuBarItemTagTests: XCTestCase {
         XCTAssertTrue(tag.isMovable)
     }
 
-    func testMenuBarAgentKnownModulesAreAnchoredOnMacOS27() throws {
+    func testMacOS27OnlyTrailingSystemItemsAreAnchored() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
         }
 
-        for title in MenuBarItemTag.menuBarAgentAnchoredModuleTitles {
+        let anchoredTags = [
+            MenuBarItemTag(namespace: .menuBarAgent, title: "Clock"),
+            MenuBarItemTag(namespace: .menuBarAgent, title: "BentoBox-0"),
+            MenuBarItemTag(namespace: .menuBarAgent, title: "com.apple.menuextra.clock"),
+            MenuBarItemTag(namespace: .menuBarAgent, title: "com.apple.menuextra.controlcenter"),
+            MenuBarItemTag(namespace: .systemUIServer, title: "Siri"),
+        ]
+
+        for tag in anchoredTags {
+            XCTAssertTrue(tag.isLayoutAnchoredSystemItem, tag.description)
+            XCTAssertFalse(tag.isMovable, tag.description)
+            XCTAssertFalse(tag.canBeHidden, tag.description)
+        }
+    }
+
+    func testMacOS27OtherMenuBarAgentModulesAreMovable() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
+        }
+
+        let movableTitles = [
+            "WiFi",
+            "Sound",
+            "Bluetooth",
+            "NowPlaying",
+            "FocusModes",
+            "com.apple.menuextra.wifi",
+            "com.apple.menuextra.sound",
+            "com.apple.menuextra.bluetooth",
+            "com.apple.menuextra.now-playing",
+            "com.apple.menuextra.focusmode",
+        ]
+
+        for title in movableTitles {
             let tag = MenuBarItemTag(namespace: .menuBarAgent, title: title)
 
-            XCTAssertTrue(tag.isLayoutAnchoredSystemItem, title)
-            XCTAssertFalse(tag.isMovable, title)
-            XCTAssertFalse(tag.canBeHidden, title)
+            XCTAssertFalse(tag.isLayoutAnchoredSystemItem, title)
+            XCTAssertTrue(tag.isMovable, title)
         }
     }
 
@@ -594,7 +626,7 @@ final class MenuBarItemTagTests: XCTestCase {
 
 final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
     @MainActor
-    func testVisibleOrderingMovesMenuBarAgentItemsToEnd() throws {
+    func testVisibleOrderingUsesLiveOrderForMenuBarAgentItems() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
         }
@@ -612,12 +644,12 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
 
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
-            [alpha.uniqueIdentifier, beta.uniqueIdentifier, gamma.uniqueIdentifier, wifi.uniqueIdentifier]
+            [alpha.uniqueIdentifier, wifi.uniqueIdentifier, beta.uniqueIdentifier, gamma.uniqueIdentifier]
         )
     }
 
     @MainActor
-    func testVisibleOrderingMovesMenuBarAgentItemsToEndWithoutSavedOrder() throws {
+    func testVisibleOrderingKeepsMenuBarAgentItemsInLiveOrderWithoutSavedOrder() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
         }
@@ -634,12 +666,12 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
 
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
-            [alpha.uniqueIdentifier, beta.uniqueIdentifier, wifi.uniqueIdentifier]
+            [alpha.uniqueIdentifier, wifi.uniqueIdentifier, beta.uniqueIdentifier]
         )
     }
 
     @MainActor
-    func testVisibleOrderingKeepsMenuBarAgentTrailingBlockInLiveOrder() throws {
+    func testVisibleOrderingKeepsMixedAppleAndAppItemsInLiveOrder() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
         }
@@ -671,9 +703,9 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
             [
                 alpha.uniqueIdentifier,
                 beta.uniqueIdentifier,
+                wifi.uniqueIdentifier,
                 gamma.uniqueIdentifier,
                 delta.uniqueIdentifier,
-                wifi.uniqueIdentifier,
                 controlCenter.uniqueIdentifier,
                 unknownModule.uniqueIdentifier,
             ]
@@ -698,7 +730,7 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
 
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
-            [alpha.uniqueIdentifier, beta.uniqueIdentifier, clock.uniqueIdentifier]
+            [alpha.uniqueIdentifier, clock.uniqueIdentifier, beta.uniqueIdentifier]
         )
     }
 
@@ -718,7 +750,7 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
             in: .visible
         )
 
-        XCTAssertEqual(identifiers, [alpha.uniqueIdentifier, beta.uniqueIdentifier])
+        XCTAssertEqual(identifiers, [alpha.uniqueIdentifier, unknownModule.uniqueIdentifier, beta.uniqueIdentifier])
     }
 
     @MainActor
