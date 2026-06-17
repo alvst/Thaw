@@ -269,9 +269,13 @@ final class SimpleItemHider: ObservableObject {
         }
     }
 
-    /// Reorders `items` to match the user's recorded order for `section`.
-    /// On macOS 27, visible MenuBarAgent items are kept as a trailing live-order
-    /// block so Apple-hosted modules do not get mixed into Thaw's saved order.
+    /// Reorders `items` for the requested section.
+    ///
+    /// On macOS 27, the visible layout must mirror fresh AX geometry instead of
+    /// persisted order. Persisted visible order can be stale after a failed
+    /// physical move, which makes the layout UI drift away from the real menu
+    /// bar. Hidden-style sections still use the user's recorded order because
+    /// those items may not have meaningful live positions.
     func ordered(_ items: [MenuBarItem], in section: MenuBarSection.Name) -> [MenuBarItem] {
         let order = sectionItemOrder[section] ?? []
         return Self.orderedItems(items, in: section, using: order)
@@ -283,7 +287,7 @@ final class SimpleItemHider: ObservableObject {
         using order: [String]
     ) -> [MenuBarItem] {
         if section == .visible {
-            return visibleItemsWithTrailingMenuBarAgentBlock(items, using: order)
+            return visibleItemsInLiveOrderWithTrailingMenuBarAgentBlock(items)
         }
 
         guard !order.isEmpty else {
@@ -298,18 +302,23 @@ final class SimpleItemHider: ObservableObject {
         }.map(\.element)
     }
 
-    private static func visibleItemsWithTrailingMenuBarAgentBlock(
-        _ items: [MenuBarItem],
-        using order: [String]
+    private static func visibleItemsInLiveOrderWithTrailingMenuBarAgentBlock(
+        _ items: [MenuBarItem]
     ) -> [MenuBarItem] {
-        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let partition = partitionMenuBarAgentItems(items)
-        let orderedNonMenuBarAgentItems = partition.nonMenuBarAgent.enumerated().sorted { lhs, rhs in
-            let lr = rank[lhs.element.uniqueIdentifier] ?? (order.count + lhs.offset)
-            let rr = rank[rhs.element.uniqueIdentifier] ?? (order.count + rhs.offset)
-            return lr < rr
-        }.map(\.element)
-        return orderedNonMenuBarAgentItems + partition.menuBarAgent
+        return liveVisualOrder(partition.nonMenuBarAgent) + liveVisualOrder(partition.menuBarAgent)
+    }
+
+    private static func liveVisualOrder(_ items: [MenuBarItem]) -> [MenuBarItem] {
+        items.sorted { lhs, rhs in
+            if lhs.bounds.midX == rhs.bounds.midX {
+                if lhs.bounds.minX == rhs.bounds.minX {
+                    return lhs.uniqueIdentifier < rhs.uniqueIdentifier
+                }
+                return lhs.bounds.minX < rhs.bounds.minX
+            }
+            return lhs.bounds.midX < rhs.bounds.midX
+        }
     }
 
     private static func isMacOS27MenuBarAgentItem(_ item: MenuBarItem) -> Bool {

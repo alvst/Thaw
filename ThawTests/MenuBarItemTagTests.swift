@@ -612,7 +612,7 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
 
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
-            [gamma.uniqueIdentifier, beta.uniqueIdentifier, alpha.uniqueIdentifier, wifi.uniqueIdentifier]
+            [alpha.uniqueIdentifier, beta.uniqueIdentifier, gamma.uniqueIdentifier, wifi.uniqueIdentifier]
         )
     }
 
@@ -669,10 +669,10 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
             [
-                delta.uniqueIdentifier,
-                gamma.uniqueIdentifier,
-                beta.uniqueIdentifier,
                 alpha.uniqueIdentifier,
+                beta.uniqueIdentifier,
+                gamma.uniqueIdentifier,
+                delta.uniqueIdentifier,
                 wifi.uniqueIdentifier,
                 controlCenter.uniqueIdentifier,
                 unknownModule.uniqueIdentifier,
@@ -698,7 +698,7 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
 
         XCTAssertEqual(
             ordered.map(\.uniqueIdentifier),
-            [beta.uniqueIdentifier, alpha.uniqueIdentifier, clock.uniqueIdentifier]
+            [alpha.uniqueIdentifier, beta.uniqueIdentifier, clock.uniqueIdentifier]
         )
     }
 
