@@ -29,23 +29,55 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     /// by this tag is a system item.
     var isSystemItem: Bool {
         switch namespace {
-        case .controlCenter, .menuBarAgent, .systemUIServer, .textInputMenuAgent, .weather, .passwords, .screenCaptureUI, .ssMenuAgent, .thaw, .gamePolicyAgent:
+        case .controlCenter, .systemUIServer, .textInputMenuAgent, .weather, .passwords, .screenCaptureUI, .ssMenuAgent, .thaw, .gamePolicyAgent:
             return true
+        case .menuBarAgent:
+            if #available(macOS 27, *) {
+                return true
+            }
+            return false
         case .string, .uuid, .null:
             return false
         }
     }
 
+    /// A Boolean value that indicates whether this item should be rendered as a
+    /// fixed system anchor in the layout UI.
+    ///
+    /// macOS 27 exposes Apple modules as children of `MenuBarAgent`. These are
+    /// live AX items that should remain visible at their real positions, but Thaw
+    /// must not treat them as draggable or persist them into user layout order.
+    var isLayoutAnchoredSystemItem: Bool {
+        if MenuBarItemTag.immovableItems.contains(where: { $0.namespace == namespace && $0.title == title }) {
+            return true
+        }
+
+        if MenuBarItemTag.fixedSystemAgentNamespaces.contains(namespace) {
+            return true
+        }
+
+        if #available(macOS 27, *) {
+            if namespace == .menuBarAgent,
+               MenuBarItemTag.menuBarAgentAnchoredModuleTitles.contains(title)
+            {
+                return true
+            }
+        }
+
+        return false
+    }
+
     /// A Boolean value that indicates whether the item identified
     /// by this tag can be moved.
     var isMovable: Bool {
-        !MenuBarItemTag.immovableItems.contains(where: { $0.namespace == namespace && $0.title == title })
+        !isLayoutAnchoredSystemItem
     }
 
     /// A Boolean value that indicates whether the item identified
     /// by this tag can be hidden.
     var canBeHidden: Bool {
-        !MenuBarItemTag.nonHideableItems.contains(where: { $0.namespace == namespace && $0.title == title }) &&
+        !isLayoutAnchoredSystemItem &&
+            !MenuBarItemTag.nonHideableItems.contains(where: { $0.namespace == namespace && $0.title == title }) &&
             !(namespace.isUUID && title == "AudioVideoModule")
     }
 
@@ -171,6 +203,31 @@ extension MenuBarItemTag {
 
     /// An array of tags for items representing Ice's control items.
     static let controlItems = ControlItem.Identifier.allCases.map(\.tag)
+
+    /// Apple modules currently observed under `com.apple.MenuBarAgent` on
+    /// macOS 27. These names come from `VisibleCC` keys and
+    /// `TrailingItemPreferredPositions` entries such as `module:Clock`.
+    static let menuBarAgentAnchoredModuleTitles: Set<String> = [
+        "AudioVideoModule",
+        "Battery",
+        "BentoBox-0",
+        "Bluetooth",
+        "Clock",
+        "Display",
+        "FocusModes",
+        "MusicRecognition",
+        "NowPlaying",
+        "ScreenMirroring",
+        "Sound",
+        "WiFi",
+    ]
+
+    /// Separate Apple/system agents that Thaw should display but not move.
+    private static let fixedSystemAgentNamespaces: Set<Namespace> = [
+        .gamePolicyAgent,
+        .screenCaptureUI,
+        .ssMenuAgent,
+    ]
 
     // MARK: Control Items
 
