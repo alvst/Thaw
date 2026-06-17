@@ -32,16 +32,23 @@ enum Constants {
 
     // MARK: - OS capabilities
 
-    /// Whether menu bar section hiding is supported on the current OS.
+    /// Whether the *legacy* (reflow-based) menu bar section hiding is supported
+    /// on the current OS.
     ///
     /// macOS 27 (Golden Gate) moved status-item hosting into `MenuBarAgent` and
-    /// removed every mechanism a third-party app could use to hide items:
+    /// removed every legacy mechanism a third-party app could use to hide items:
     /// expanding a divider no longer reflows neighbors off-screen, a synthesized
     /// ⌘-drag cannot drop an item off-screen (the bar repacks), and items have no
-    /// externally addressable window for the SkyLight status-bar APIs. The app
-    /// therefore runs in **reorder-only** mode on macOS 27 — hiding/show-on-hover
-    /// and the section dividers' expand-to-hide behavior are disabled, and the
-    /// hide UI is replaced with an "unavailable" notice.
+    /// externally addressable window for the SkyLight status-bar APIs. This flag
+    /// is therefore `false` on macOS 27 and gates off all of that legacy
+    /// machinery (the expand-to-hide dividers, the off-screen section reflow).
+    ///
+    /// Hiding itself is **not** gone on macOS 27 — it is reconstructed on top of
+    /// the private "Assessment Mode" visibility-restriction assertion (see
+    /// ``SimpleItemHider`` / `AssessmentModeBackend`), which drives the restored
+    /// drag-between-sections layout UI. Use this flag only to
+    /// branch between the legacy reflow path (≤26) and the assertion path (27+),
+    /// never as "hiding is unavailable".
     static var supportsSectionHiding: Bool {
         if #available(macOS 27, *) {
             return false

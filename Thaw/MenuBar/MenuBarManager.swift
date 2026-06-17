@@ -91,6 +91,10 @@ final class MenuBarManager: ObservableObject {
     /// appearance editor interface
     let appearanceEditorPanel = MenuBarAppearanceEditorPanel()
 
+    /// macOS 27 only: assignment-backed hiding through the Assessment Mode
+    /// visibility restriction. `nil` on macOS <=26.
+    private(set) var simpleItemHider: SimpleItemHider?
+
     /// The managed sections in the menu bar.
     let sections = [
         MenuBarSection(name: .visible),
@@ -113,6 +117,13 @@ final class MenuBarManager: ObservableObject {
         appearanceEditorPanel.performSetup(with: appState)
         for section in sections {
             section.performSetup(with: appState)
+        }
+        // macOS 27 (and later) cannot hide items by divider reflow. Keep a
+        // separate assignment model that drives the Assessment Mode allowlist.
+        if !Constants.supportsSectionHiding {
+            let hider = SimpleItemHider(appState: appState)
+            hider.start()
+            simpleItemHider = hider
         }
         rebuildItemHotkeys()
     }
@@ -178,7 +189,11 @@ final class MenuBarManager: ObservableObject {
                         Task {
                             // Add delay for smart strategy to allow app focus to settle
                             let delay: TimeInterval = appState.settings.general.rehideStrategy == .smart ? 0.25 : 0.1
-                            try await Task.sleep(for: .seconds(delay))
+                            do {
+                                try await Task.sleep(for: .seconds(delay))
+                            } catch {
+                                return
+                            }
 
                             // Ignore rehide requests for a short grace period after showing.
                             if let lastShow = self.lastShowTimestamp,
