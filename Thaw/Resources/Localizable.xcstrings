@@ -1937,6 +1937,9 @@
         }
       }
     },
+    "%lld m" : {
+
+    },
     "%lld seconds" : {
       "comment" : "Text that describes the rehide interval, in seconds. The argument is the number of seconds.",
       "localizations" : {
@@ -3386,6 +3389,9 @@
         }
       }
     },
+    "Add Condition" : {
+
+    },
     "Add Trigger" : {
 
     },
@@ -3876,6 +3882,12 @@
     },
     "Almost there! %@ needs the permissions below to manage your menu bar." : {
       "comment" : "Subtitle on the permissions screen reassuring the user they're nearly done. The argument is the name of the app."
+    },
+    "Also move" : {
+
+    },
+    "Also move another item" : {
+
     },
     "Always show hidden items" : {
       "comment" : "A toggle that allows users to configure whether hidden menu bar items should always be visible in the native menu bar on a particular display.",
@@ -4471,6 +4483,9 @@
           }
         }
       }
+    },
+    "Another enabled trigger also targets this item; they may fight over showing and hiding it." : {
+
     },
     "Appearance" : {
       "comment" : "The localized string key for the \"Appearance\" section in the \"Settings\" interface.",
@@ -9262,6 +9277,15 @@
         }
       }
     },
+    "Capture Reference" : {
+
+    },
+    "Captures the icon now as a reference, then reveals the item when the icon later changes from it. Requires screen recording permission." : {
+
+    },
+    "Capturing…" : {
+
+    },
     "Change the menu bar's appearance." : {
       "comment" : "Detail about the \"Screen Recording\" permission, describing how to change the menu bar's appearance.",
       "extractionState" : "stale",
@@ -10575,6 +10599,9 @@
     "Choose an app…" : {
 
     },
+    "Choose an item…" : {
+
+    },
     "Choose image…" : {
       "comment" : "A button to import a custom icon for the app.",
       "localizations" : {
@@ -10931,6 +10958,9 @@
           }
         }
       }
+    },
+    "Choose…" : {
+
     },
     "Clear" : {
       "comment" : "A glass style that is clear.",
@@ -12728,6 +12758,9 @@
           }
         }
       }
+    },
+    "Custom delay" : {
+
     },
     "Custom icon uses dynamic appearance" : {
       "comment" : "A toggle that lets the user choose whether the custom ice icon should use a dynamic appearance.",
@@ -24326,6 +24359,9 @@
         }
       }
     },
+    "Live status of this trigger" : {
+
+    },
     "Live System State" : {
 
     },
@@ -24804,6 +24840,9 @@
           }
         }
       }
+    },
+    "Match" : {
+
     },
     "max" : {
       "comment" : "Text displayed in a setting that allows the user to select the maximum item spacing.",
@@ -27670,6 +27709,9 @@
         }
       }
     },
+    "No location captured" : {
+
+    },
     "No menu bar items available" : {
       "comment" : "Text shown in the per-item hotkeys list when there are no menu bar items to assign a hotkey to."
     },
@@ -28029,6 +28071,9 @@
           }
         }
       }
+    },
+    "No reference yet" : {
+
     },
     "No shape kind selected" : {
       "comment" : "A message displayed when the user hasn't selected a shape kind for the menu bar.",
@@ -29222,6 +29267,9 @@
           }
         }
       }
+    },
+    "Notify when this reveals the item" : {
+
     },
     "Off" : {
       "comment" : "A label for the icon refresh rate when it is set to 0.",
@@ -31472,6 +31520,9 @@
         }
       }
     },
+    "Radius" : {
+
+    },
     "Record Hotkey" : {
       "comment" : "A label for the button that starts recording a hotkey.",
       "localizations" : {
@@ -31590,6 +31641,9 @@
           }
         }
       }
+    },
+    "Reference captured" : {
+
     },
     "Regular" : {
       "comment" : "A description of a glass style.",
@@ -31947,6 +32001,9 @@
           }
         }
       }
+    },
+    "Remove this condition" : {
+
     },
     "Rename" : {
       "comment" : "A menu item that lets the user rename a profile.",
@@ -34684,6 +34741,9 @@
           }
         }
       }
+    },
+    "Runs your script about every 30 seconds. Reveals when it exits 0, or — if an expected output is set — when its output contains that text." : {
+
     },
     "s" : {
       "comment" : "Seconds unit suffix for timeout field",
@@ -41988,6 +42048,9 @@
         }
       }
     },
+    "Threshold" : {
+
+    },
     "Timed" : {
       "comment" : "Localized string key for the \"Timed\" option in the \"Auto-rehide\" settings.",
       "localizations" : {
@@ -43313,6 +43376,9 @@
 
     },
     "Triggers" : {
+
+    },
+    "Turn on the Location flag in Developer settings and grant permission to capture your current location." : {
 
     },
     "Type Hotkey" : {
@@ -44981,6 +45047,9 @@
         }
       }
     },
+    "Use Current Location" : {
+
+    },
     "Use dynamic appearance" : {
       "comment" : "A toggle that lets the user choose whether to use different appearance settings based on the current system appearance.",
       "localizations" : {
@@ -46170,6 +46239,9 @@
           }
         }
       }
+    },
+    "Watched item" : {
+
     },
     "We found existing settings from Ice, the original app." : {
       "comment" : "A description of the feature that allows users to import settings from the original app, Ice.",

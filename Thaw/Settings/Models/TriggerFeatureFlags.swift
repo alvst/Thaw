@@ -35,6 +35,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     case thermalPressure
     case recordingDevices
     case scriptResult
+    case imageComparison
     case compoundConditions
     case advancedOptions
     case invertAction
@@ -59,6 +60,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .thermalPressure: "Thermal pressure"
         case .recordingDevices: "Camera / microphone in use"
         case .scriptResult: "Script result"
+        case .imageComparison: "Menu bar icon changed"
         case .compoundConditions: "Combine conditions (AND / OR)"
         case .advancedOptions: "Advanced per-trigger options"
         case .invertAction: "Invert action (hide when met)"
@@ -83,6 +85,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
         case .thermalPressure: "Reveal an item when the system is under thermal pressure."
         case .recordingDevices: "Reveal an item while the camera or microphone is in use."
         case .scriptResult: "Reveal an item based on a script's exit code or output (runs your script periodically)."
+        case .imageComparison: "Reveal an item when a watched menu bar icon changes from a captured reference (uses screen capture)."
         case .compoundConditions: "Let a trigger combine several conditions with AND / OR."
         case .advancedOptions: "Show per-trigger options: a notification when it reveals and a custom delay."
         case .invertAction: "Allow triggers to hide (instead of reveal) when the condition is met."
@@ -93,7 +96,7 @@ enum TriggerFeature: String, CaseIterable, Identifiable {
     /// may not work reliably on all systems.
     var isExperimental: Bool {
         switch self {
-        case .wifiSSID, .focusMode, .location, .scriptResult: true
+        case .wifiSSID, .focusMode, .location, .scriptResult, .imageComparison: true
         default: false
         }
     }

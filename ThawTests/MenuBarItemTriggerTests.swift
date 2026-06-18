@@ -253,6 +253,79 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(converted.thermalLevel, .critical)
     }
 
+    // MARK: - Image comparison
+
+    /// Builds a small test image: the left `whiteColumns` columns white, rest black.
+    private func makeImage(whiteColumns: Int, size: Int = 16) -> CGImage {
+        let bytesPerRow = size
+        var pixels = [UInt8](repeating: 0, count: size * size)
+        for y in 0 ..< size {
+            for x in 0 ..< size where x < whiteColumns {
+                pixels[y * size + x] = 255
+            }
+        }
+        let context = CGContext(
+            data: &pixels, width: size, height: size, bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        )!
+        return context.makeImage()!
+    }
+
+    func testHammingDistanceBasics() {
+        XCTAssertEqual(ImageHashing.hammingDistance(0, 0), 0)
+        XCTAssertEqual(ImageHashing.hammingDistance(0xFF, 0), 8)
+        XCTAssertEqual(ImageHashing.hammingDistance(.max, 0), 64)
+    }
+
+    func testAverageHashIsDeterministic() {
+        let image = makeImage(whiteColumns: 8)
+        XCTAssertEqual(ImageHashing.averageHash(image), ImageHashing.averageHash(image))
+    }
+
+    func testAverageHashDetectsLargeChange() throws {
+        let mostlyBlack = try XCTUnwrap(ImageHashing.averageHash(makeImage(whiteColumns: 2)))
+        let mostlyWhite = try XCTUnwrap(ImageHashing.averageHash(makeImage(whiteColumns: 14)))
+        XCTAssertGreaterThan(ImageHashing.hammingDistance(mostlyBlack, mostlyWhite), ImageHashing.changeThreshold)
+    }
+
+    func testImageChangedCondition() {
+        let id = "com.apple.controlcenter:Battery"
+        let reference: UInt64 = 0x0000_0000_0000_0000
+        let condition = TriggerCondition.imageChanged(itemIdentifier: id, referenceHash: reference)
+
+        var changed = state()
+        changed.imageHashes = [id: .max] // 64 bits different -> changed
+        XCTAssertTrue(condition.isSatisfied(state: changed))
+
+        var same = state()
+        same.imageHashes = [id: reference]
+        XCTAssertFalse(condition.isSatisfied(state: same))
+
+        // No reference captured -> never satisfied.
+        let noRef = TriggerCondition.imageChanged(itemIdentifier: id, referenceHash: nil)
+        XCTAssertFalse(noRef.isSatisfied(state: changed))
+    }
+
+    func testImageChangedCodableRoundTrip() throws {
+        let id = "com.apple.controlcenter:Battery"
+        let condition = TriggerCondition.imageChanged(itemIdentifier: id, referenceHash: 0)
+
+        let data = try JSONEncoder().encode(condition)
+        let decoded = try JSONDecoder().decode(TriggerCondition.self, from: data)
+
+        XCTAssertEqual(decoded, condition)
+    }
+
+    func testImageChangedWithoutReferenceCodableRoundTrip() throws {
+        let condition = TriggerCondition.imageChanged(itemIdentifier: "item", referenceHash: nil)
+
+        let data = try JSONEncoder().encode(condition)
+        let decoded = try JSONDecoder().decode(TriggerCondition.self, from: data)
+
+        XCTAssertEqual(decoded, condition)
+    }
+
     // MARK: - Kind / editor mapping
 
     func testKindRoundTrip() {
@@ -279,6 +352,7 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(TriggerConditionKind.frontmostApp.requiredFeature, .frontmostApp)
         XCTAssertEqual(TriggerConditionKind.vpnActive.requiredFeature, .vpn)
         XCTAssertEqual(TriggerConditionKind.schedule.requiredFeature, .schedule)
+        XCTAssertEqual(TriggerConditionKind.imageChanged.requiredFeature, .imageComparison)
     }
 
     // MARK: - Compound conditions

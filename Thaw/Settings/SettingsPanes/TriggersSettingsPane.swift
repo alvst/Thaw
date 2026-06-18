@@ -104,8 +104,9 @@ struct TriggersSettingsPane: View {
                         advancedEnabled: flags.isEnabled(.advancedOptions),
                         conditionActive: allConditionsActive(trigger),
                         liveStatus: liveStatus(for: trigger),
-                        hasConflict: !trigger.itemIdentifier.isEmpty && conflicts.contains(trigger.itemIdentifier),
+                        hasConflict: trigger.allItemIdentifiers.contains { conflicts.contains($0) },
                         currentCoordinate: { manager.systemMonitor.currentCoordinate },
+                        captureReference: { await manager.captureReferenceHash(forItemIdentifier: $0) },
                         focusedField: $focusedField,
                         onDelete: { manager.remove(id: trigger.id) }
                     )
@@ -284,6 +285,7 @@ private struct TriggerRow: View {
     let liveStatus: TriggerLiveStatus
     let hasConflict: Bool
     let currentCoordinate: () -> (latitude: Double, longitude: Double)?
+    let captureReference: (String) async -> UInt64?
     var focusedField: FocusState<String?>.Binding
     let onDelete: () -> Void
 
@@ -500,7 +502,9 @@ private struct TriggerRow: View {
                             condition: additionalConditionBinding(index),
                             kinds: enabledKinds,
                             appOptions: appOptions,
+                            itemOptions: itemOptions,
                             currentCoordinate: currentCoordinate,
+                            captureReference: captureReference,
                             focusedField: focusedField,
                             focusID: "c\(index + 1)-\(trigger.id)"
                         )
@@ -597,6 +601,8 @@ private struct TriggerRow: View {
             }
         case .script:
             ScriptConditionEditor(condition: $trigger.condition, focusedField: focusedField, focusID: "c0-\(trigger.id)")
+        case .imageComparison:
+            ImageConditionEditor(condition: $trigger.condition, itemOptions: itemOptions, captureReference: captureReference)
         case .none:
             EmptyView()
         }
@@ -814,7 +820,9 @@ private struct ConditionEditorView: View {
     @Binding var condition: TriggerCondition
     let kinds: [TriggerConditionKind]
     let appOptions: [TriggerAppOption]
+    let itemOptions: [TriggerItemOption]
     let currentCoordinate: () -> (latitude: Double, longitude: Double)?
+    let captureReference: (String) async -> UInt64?
     var focusedField: FocusState<String?>.Binding
     let focusID: String
 
@@ -886,6 +894,8 @@ private struct ConditionEditorView: View {
             }
         case .script:
             ScriptConditionEditor(condition: $condition, focusedField: focusedField, focusID: focusID)
+        case .imageComparison:
+            ImageConditionEditor(condition: $condition, itemOptions: itemOptions, captureReference: captureReference)
         case .none:
             EmptyView()
         }
@@ -1016,6 +1026,70 @@ private struct ScriptConditionEditor: View {
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
             condition = condition.withScriptPath(url.path)
+        }
+    }
+}
+
+// MARK: - ImageConditionEditor
+
+/// Editor for an image-comparison condition: pick a menu bar item to watch
+/// and capture a reference image of its icon.
+private struct ImageConditionEditor: View {
+    @Binding var condition: TriggerCondition
+    let itemOptions: [TriggerItemOption]
+    let captureReference: (String) async -> UInt64?
+
+    @State private var isCapturing = false
+
+    private var watchedID: String { condition.imageValue?.itemIdentifier ?? "" }
+    private var hasReference: Bool {
+        guard case let .imageChanged(_, referenceHash) = condition else { return false }
+        return referenceHash != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            IcePicker("Watched item", selection: itemBinding) {
+                if watchedID.isEmpty {
+                    Text("Choose an item…").tag("")
+                } else if !itemOptions.contains(where: { $0.id == watchedID }) {
+                    Text("\(watchedID) (not present)").tag(watchedID)
+                }
+                ForEach(itemOptions, id: \.id) { option in
+                    Text(option.name).tag(option.id)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button(isCapturing ? "Capturing…" : "Capture Reference") { capture() }
+                    .disabled(isCapturing || watchedID.isEmpty)
+                Spacer()
+                Text(hasReference ? "Reference captured" : "No reference yet")
+                    .font(.caption)
+                    .foregroundStyle(hasReference ? .green : .secondary)
+            }
+
+            Text("Captures the icon now as a reference, then reveals the item when the icon later changes from it. Requires screen recording permission.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var itemBinding: Binding<String> {
+        Binding(get: { watchedID }, set: { condition = condition.withImageItem($0) })
+    }
+
+    private func capture() {
+        let id = watchedID
+        guard !id.isEmpty else { return }
+        isCapturing = true
+        Task { @MainActor in
+            let hash = await captureReference(id)
+            isCapturing = false
+            if let hash {
+                condition = condition.withImageReferenceHash(hash)
+            }
         }
     }
 }

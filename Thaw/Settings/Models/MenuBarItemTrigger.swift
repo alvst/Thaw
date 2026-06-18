@@ -79,6 +79,9 @@ enum TriggerCondition: Codable, Hashable {
     // Script
     case scriptResult(path: String, expectedOutput: String)
 
+    // Image comparison
+    case imageChanged(itemIdentifier: String, referenceHash: UInt64?)
+
     /// Returns whether the condition is satisfied by the given state at the
     /// given time.
     func isSatisfied(state: SystemState, now: Date = Date()) -> Bool {
@@ -145,6 +148,9 @@ enum TriggerCondition: Codable, Hashable {
                 return outcome.exitCode == 0
             }
             return outcome.output.localizedCaseInsensitiveContains(expectedOutput)
+        case let .imageChanged(itemIdentifier, referenceHash):
+            guard let referenceHash, let current = state.imageHashes[itemIdentifier] else { return false }
+            return ImageHashing.hammingDistance(current, referenceHash) > ImageHashing.changeThreshold
         }
     }
 
@@ -198,6 +204,8 @@ enum TriggerCondition: Codable, Hashable {
         case let .scriptResult(path, expectedOutput):
             let name = path.isEmpty ? "a script" : ((path as NSString).lastPathComponent)
             return expectedOutput.isEmpty ? "\(name) exits 0" : "\(name) outputs “\(expectedOutput)”"
+        case let .imageChanged(_, referenceHash):
+            return referenceHash == nil ? "An icon changed (capture a reference)" : "A watched icon changed"
         }
     }
 
@@ -262,6 +270,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case cameraInUse
     case microphoneInUse
     case scriptResult
+    case imageChanged
 
     var id: String { rawValue }
 
@@ -290,6 +299,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .cameraInUse: "Camera is in use"
         case .microphoneInUse: "Microphone is in use"
         case .scriptResult: "Script result"
+        case .imageChanged: "Menu bar icon changed"
         }
     }
 
@@ -306,7 +316,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     var settleInterval: Duration {
         switch self {
         case .batteryBelow, .batteryAtOrAbove: .seconds(6)
-        case .scriptResult: .seconds(2)
+        case .scriptResult, .imageChanged: .seconds(2)
         default: .seconds(1)
         }
     }
@@ -324,6 +334,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .nearLocation: .location
         case .thermalPressure: .thermalLevel
         case .scriptResult: .script
+        case .imageChanged: .imageComparison
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive, .lowPowerMode,
              .cameraInUse, .microphoneInUse:
@@ -354,6 +365,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .cameraInUse: .recordingDevices
         case .microphoneInUse: .recordingDevices
         case .scriptResult: .scriptResult
+        case .imageChanged: .imageComparison
         }
     }
 }
@@ -368,6 +380,7 @@ enum TriggerConditionEditor: Equatable {
     case location
     case thermalLevel
     case script
+    case imageComparison
 }
 
 // MARK: - TriggerCondition <-> Kind
@@ -398,6 +411,7 @@ extension TriggerCondition {
         case .cameraInUse: .cameraInUse
         case .microphoneInUse: .microphoneInUse
         case .scriptResult: .scriptResult
+        case .imageChanged: .imageChanged
         }
     }
 
@@ -459,6 +473,14 @@ extension TriggerCondition {
         }
     }
 
+    /// The watched item and reference hash, for the image-comparison condition.
+    var imageValue: (itemIdentifier: String, referenceHash: UInt64?)? {
+        switch self {
+        case let .imageChanged(itemIdentifier, referenceHash): (itemIdentifier, referenceHash)
+        default: nil
+        }
+    }
+
     /// Builds the default condition for the given kind.
     static func defaultCondition(for kind: TriggerConditionKind) -> TriggerCondition {
         switch kind {
@@ -484,6 +506,7 @@ extension TriggerCondition {
         case .cameraInUse: .cameraInUse
         case .microphoneInUse: .microphoneInUse
         case .scriptResult: .scriptResult(path: "", expectedOutput: "")
+        case .imageChanged: .imageChanged(itemIdentifier: "", referenceHash: nil)
         }
     }
 
@@ -506,6 +529,9 @@ extension TriggerCondition {
         case .scriptResult:
             old.scriptValue.map { TriggerCondition.scriptResult(path: $0.path, expectedOutput: $0.expectedOutput) }
                 ?? .scriptResult(path: "", expectedOutput: "")
+        case .imageChanged:
+            old.imageValue.map { TriggerCondition.imageChanged(itemIdentifier: $0.itemIdentifier, referenceHash: $0.referenceHash) }
+                ?? .imageChanged(itemIdentifier: "", referenceHash: nil)
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
              .vpnActive, .externalDisplay, .focusActive, .nearLocation, .lowPowerMode,
              .cameraInUse, .microphoneInUse:
@@ -560,6 +586,19 @@ extension TriggerCondition {
     func withScriptExpectedOutput(_ expectedOutput: String) -> TriggerCondition {
         guard case let .scriptResult(path, _) = self else { return self }
         return .scriptResult(path: path, expectedOutput: expectedOutput)
+    }
+
+    /// Returns a copy of the image condition with the watched item replaced
+    /// (clearing the reference hash, since it no longer applies).
+    func withImageItem(_ itemIdentifier: String) -> TriggerCondition {
+        guard case .imageChanged = self else { return self }
+        return .imageChanged(itemIdentifier: itemIdentifier, referenceHash: nil)
+    }
+
+    /// Returns a copy of the image condition with the reference hash replaced.
+    func withImageReferenceHash(_ referenceHash: UInt64) -> TriggerCondition {
+        guard case let .imageChanged(itemIdentifier, _) = self else { return self }
+        return .imageChanged(itemIdentifier: itemIdentifier, referenceHash: referenceHash)
     }
 
     /// Returns a copy with the thermal threshold replaced.

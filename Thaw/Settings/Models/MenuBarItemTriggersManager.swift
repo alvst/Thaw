@@ -30,6 +30,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
             // section, so this does not warp the cursor on no-op edits.)
             lastAppliedReveal.removeAll()
             runScriptsIfNeeded()
+            refreshImageHashesIfNeeded()
             scheduleEvaluation()
         }
     }
@@ -69,6 +70,13 @@ final class MenuBarItemTriggersManager: ObservableObject {
     /// Guards against overlapping script-run passes.
     private var isRunningScripts = false
 
+    /// Cached perceptual hashes of watched items for image-comparison
+    /// conditions, keyed by tag identifier, injected into the system state.
+    private var imageHashes = [String: UInt64]()
+
+    /// Guards against overlapping image-capture passes.
+    private var isRefreshingImages = false
+
     /// Serializes all trigger-driven item moves. Each batch awaits the
     /// previous one so synthetic-drag moves never overlap — overlapping
     /// moves desync the move engine's cursor hide/show and can strand items.
@@ -81,6 +89,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
     private var evaluationState: SystemState {
         var state = systemMonitor.state
         state.scriptOutcomes = scriptOutcomes
+        state.imageHashes = imageHashes
         return state
     }
 
@@ -112,17 +121,27 @@ final class MenuBarItemTriggersManager: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.runScriptsIfNeeded()
+                self.refreshImageHashesIfNeeded()
                 self.evaluate(for: self.evaluationState, force: true)
             }
             .store(in: &cancellables)
 
         runScriptsIfNeeded()
+        refreshImageHashesIfNeeded()
 
         // Re-apply when feature flags change (a newly enabled source may
         // satisfy a trigger that was previously inert).
         featureFlags.objectWillChange
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] in
-                self?.scheduleEvaluation()
+                // Run after the flag set mutates so cached sources whose
+                // monitors live here (scripts and image hashes) populate
+                // before the forced evaluation.
+                DispatchQueue.main.async {
+                    self?.runScriptsIfNeeded()
+                    self?.refreshImageHashesIfNeeded()
+                    self?.scheduleEvaluation()
+                }
             }
             .store(in: &cancellables)
 
@@ -181,7 +200,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
         debouncedEvaluationTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled, let self else { return }
-            self.evaluate(for: self.systemMonitor.state, force: true)
+            self.evaluate(for: self.evaluationState, force: true)
         }
     }
 
@@ -265,7 +284,7 @@ final class MenuBarItemTriggersManager: ObservableObject {
             guard
                 let trigger = self.triggers.first(where: { $0.id == triggerID }),
                 trigger.isEnabled,
-                !trigger.itemIdentifier.isEmpty,
+                !trigger.allItemIdentifiers.isEmpty,
                 self.isAvailable(trigger)
             else {
                 return
@@ -339,16 +358,22 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         // Drop cached outcomes for paths no longer referenced.
         let removed = Set(scriptOutcomes.keys).subtracting(paths)
+        let removedAny = !removed.isEmpty
         for path in removed { scriptOutcomes[path] = nil }
 
-        guard !paths.isEmpty else { return }
+        guard !paths.isEmpty else {
+            if removedAny {
+                evaluate(for: evaluationState, force: true)
+            }
+            return
+        }
 
         isRunningScripts = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isRunningScripts = false }
 
-            var changed = false
+            var changed = removedAny
             for path in paths {
                 let outcome = await TriggerScriptRunner.run(path: path)
                 let resolved = outcome ?? ScriptOutcome(exitCode: -1, output: "")
@@ -362,6 +387,80 @@ final class MenuBarItemTriggersManager: ObservableObject {
                 self.evaluate(for: self.evaluationState, force: false)
             }
         }
+    }
+
+    // MARK: - Image comparison
+
+    /// Captures the current perceptual hash for every watched item used by an
+    /// enabled image-comparison condition (when the feature is on), updating
+    /// the cache and re-evaluating when any hash changes.
+    private func refreshImageHashesIfNeeded() {
+        guard featureFlags.isEnabled(.imageComparison), !isRefreshingImages else { return }
+
+        var ids = Set<String>()
+        for trigger in triggers where trigger.isEnabled {
+            for condition in trigger.allConditions {
+                if case let .imageChanged(itemIdentifier, _) = condition, !itemIdentifier.isEmpty {
+                    ids.insert(itemIdentifier)
+                }
+            }
+        }
+
+        let removed = Set(imageHashes.keys).subtracting(ids)
+        let removedAny = !removed.isEmpty
+        for id in removed { imageHashes[id] = nil }
+
+        guard !ids.isEmpty else {
+            if removedAny {
+                evaluate(for: evaluationState, force: true)
+            }
+            return
+        }
+
+        isRefreshingImages = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRefreshingImages = false }
+
+            var changed = removedAny
+            for id in ids {
+                guard let hash = await self.currentImageHash(forItemIdentifier: id) else {
+                    if self.imageHashes[id] != nil {
+                        self.imageHashes[id] = nil
+                        changed = true
+                    }
+                    continue
+                }
+                if self.imageHashes[id] != hash {
+                    self.imageHashes[id] = hash
+                    changed = true
+                }
+            }
+            if changed {
+                self.evaluate(for: self.evaluationState, force: false)
+            }
+        }
+    }
+
+    /// Captures the watched item's window and returns its perceptual hash.
+    private func currentImageHash(forItemIdentifier id: String) async -> UInt64? {
+        guard
+            let appState,
+            let item = appState.itemManager.itemCache.managedItems.first(where: { $0.tag.tagIdentifier == id })
+        else {
+            return nil
+        }
+
+        let image = await ScreenCapture.captureWindowAsync(with: item.windowID)
+            ?? ScreenCapture.captureWindow(with: item.windowID)
+        guard let image else { return nil }
+        return ImageHashing.averageHash(image)
+    }
+
+    /// Captures a reference hash for the given item now (used by the editor's
+    /// "Capture reference" button).
+    func captureReferenceHash(forItemIdentifier id: String) async -> UInt64? {
+        await currentImageHash(forItemIdentifier: id)
     }
 
     // MARK: - Persistence

@@ -90,6 +90,10 @@ struct SystemState: Equatable {
     /// Populated by the triggers manager (not the monitor) before evaluation.
     var scriptOutcomes: [String: ScriptOutcome]
 
+    /// Current perceptual image hashes of watched items for image-comparison
+    /// conditions, keyed by item tag identifier. Populated by the manager.
+    var imageHashes: [String: UInt64]
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -109,7 +113,8 @@ struct SystemState: Equatable {
         thermalState: ProcessInfo.ThermalState = .nominal,
         isCameraInUse: Bool = false,
         isMicrophoneInUse: Bool = false,
-        scriptOutcomes: [String: ScriptOutcome] = [:]
+        scriptOutcomes: [String: ScriptOutcome] = [:],
+        imageHashes: [String: UInt64] = [:]
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -130,6 +135,7 @@ struct SystemState: Equatable {
         self.isCameraInUse = isCameraInUse
         self.isMicrophoneInUse = isMicrophoneInUse
         self.scriptOutcomes = scriptOutcomes
+        self.imageHashes = imageHashes
     }
 }
 
