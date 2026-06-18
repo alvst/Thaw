@@ -90,6 +90,7 @@ final class ControlItemDefaultsTests: XCTestCase {
     override func tearDown() {
         ControlItemDefaults[.visible, visibleAutosaveName] = nil
         ControlItemDefaults[.visibleCC, visibleAutosaveName] = nil
+        ControlItemDefaults[.preferredPosition, visibleAutosaveName] = nil
         super.tearDown()
     }
 
@@ -121,5 +122,27 @@ final class ControlItemDefaultsTests: XCTestCase {
 
         XCTAssertEqual(ControlItemDefaults[.visible, hiddenAutosaveName], false)
         XCTAssertEqual(ControlItemDefaults[.visibleCC, hiddenAutosaveName], false)
+    }
+
+    func testMacOS27VisibleControlItemDoesNotRestoreCachedPreferredPositionAfterRemoval() {
+        let shouldRestore = ControlItemDefaults.shouldRestorePreferredPositionAfterRemoval(
+            autosaveName: visibleAutosaveName,
+            isSectionDivider: false
+        )
+
+        if #available(macOS 27, *) {
+            XCTAssertFalse(shouldRestore)
+        } else {
+            XCTAssertTrue(shouldRestore)
+        }
+    }
+
+    func testSectionDividerDoesNotRestoreCachedPreferredPositionAfterRemoval() {
+        let shouldRestore = ControlItemDefaults.shouldRestorePreferredPositionAfterRemoval(
+            autosaveName: ControlItem.Identifier.hidden.rawValue,
+            isSectionDivider: true
+        )
+
+        XCTAssertFalse(shouldRestore)
     }
 }
