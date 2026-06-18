@@ -2404,10 +2404,17 @@ extension MenuBarItemManager {
     }
 
     /// Waits asynchronously for the user to pause input.
-    private nonisolated func waitForUserToPauseInput(for duration: Duration = .milliseconds(50)) async throws {
+    private nonisolated func waitForUserToPauseInput(
+        for duration: Duration = .milliseconds(50),
+        timeout: Duration? = nil
+    ) async throws {
         let waitTask = Task {
+            let start = ContinuousClock.now
             while true {
                 try Task.checkCancellation()
+                if let timeout, start.duration(to: .now) >= timeout {
+                    throw EventError.cannotComplete
+                }
                 if hasUserPausedInput(for: duration) {
                     break
                 }
@@ -3121,7 +3128,9 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         destination: MoveDestination,
         on displayID: CGDirectDisplayID,
-        warpCursorAfter: Bool = true
+        warpCursorAfter: Bool = true,
+        watchdogTimeout: DispatchTimeInterval? = nil,
+        shouldProceed: (@MainActor () -> Bool)? = nil
     ) async throws {
         var acquiredSemaphore = false
         do {
@@ -3129,18 +3138,17 @@ extension MenuBarItemManager {
             acquiredSemaphore = true
         } catch is SimpleSemaphore.TimeoutError {
             MenuBarItemManager.diagLog.error("eventSemaphore timed out (3.5s) in postMoveEvents")
-            await eventSemaphore.reset(to: 1)
-            do {
-                try await eventSemaphore.wait(timeout: .milliseconds(3500))
-                acquiredSemaphore = true
-            } catch is SimpleSemaphore.TimeoutError {
-                throw EventError.cannotComplete
-            }
+            throw EventError.cannotComplete
         }
         defer {
             if acquiredSemaphore {
                 Task.detached { [eventSemaphore] in await eventSemaphore.signal() }
             }
+        }
+
+        if shouldProceed?() == false {
+            MenuBarItemManager.diagLog.debug("postMoveEvents: cancelled after semaphore wait because caller state changed")
+            throw EventError.cannotComplete
         }
 
         // Fast-fail if the target process is dead. CGEvent.tapCreateForPid
@@ -3192,12 +3200,20 @@ extension MenuBarItemManager {
         // mouseDown; irrelevant offscreen.
         let warpPoint = targetPoints.start
         let warpIsOnScreen = NSScreen.screens.contains { $0.frame.contains(warpPoint) }
+        if shouldProceed?() == false {
+            MenuBarItemManager.diagLog.debug("postMoveEvents: cancelled before cursor warp because caller state changed")
+            throw EventError.cannotComplete
+        }
         if warpIsOnScreen {
             MouseHelpers.warpCursor(to: warpPoint)
         }
-        MouseHelpers.hideCursor()
+        MouseHelpers.hideCursor(watchdogTimeout: watchdogTimeout)
         if warpIsOnScreen {
             await eventSleep(for: .milliseconds(20))
+        }
+        if shouldProceed?() == false {
+            MenuBarItemManager.diagLog.debug("postMoveEvents: cancelled before mouseDown because caller state changed")
+            throw EventError.cannotComplete
         }
         // For notched displays, when the target is offscreen, redirect
         // mouseDown's hit-test location into the notch itself. The
@@ -3235,11 +3251,19 @@ extension MenuBarItemManager {
                 item: item,
                 timeout: timeout
             )
+            if shouldProceed?() == false {
+                MenuBarItemManager.diagLog.debug("postMoveEvents: cancelled after mouseDown because caller state changed")
+                throw EventError.cannotComplete
+            }
             itemOrigin = try await waitForMoveEventResponse(
                 from: item,
                 initialOrigin: itemOrigin,
                 timeout: timeout
             )
+            if shouldProceed?() == false {
+                MenuBarItemManager.diagLog.debug("postMoveEvents: cancelled before mouseUp because caller state changed")
+                throw EventError.cannotComplete
+            }
             try await scrombleEvent(
                 mouseUp,
                 item: item,
@@ -3344,8 +3368,10 @@ extension MenuBarItemManager {
         on displayID: CGDirectDisplayID? = nil,
         skipInputPause: Bool = false,
         requiredInputPause: Duration = .milliseconds(50),
+        inputPauseTimeout: Duration? = nil,
         watchdogTimeout: DispatchTimeInterval? = nil,
         maxMoveAttempts: Int = 8,
+        hideCursorAcrossAttempts: Bool = true,
         shouldProceed: (@MainActor () -> Bool)? = nil
     ) async throws {
         // System clone windows are transient WindowServer duplicates that
@@ -3387,7 +3413,7 @@ extension MenuBarItemManager {
         }
 
         if !skipInputPause {
-            try await waitForUserToPauseInput(for: requiredInputPause)
+            try await waitForUserToPauseInput(for: requiredInputPause, timeout: inputPauseTimeout)
         }
 
         if shouldProceed?() == false {
@@ -3431,10 +3457,14 @@ extension MenuBarItemManager {
         // override below in postMoveEvents) and the user sees a brief
         // cursor flash. 10 s is long enough to cover any single move
         // without giving up the safety net for genuinely stuck states.
-        MouseHelpers.hideCursor(watchdogTimeout: watchdogTimeout ?? .seconds(10))
+        if hideCursorAcrossAttempts {
+            MouseHelpers.hideCursor(watchdogTimeout: watchdogTimeout ?? .seconds(10))
+        }
         defer {
             MouseHelpers.warpCursor(to: mouseLocation)
-            MouseHelpers.showCursor()
+            if hideCursorAcrossAttempts {
+                MouseHelpers.showCursor()
+            }
         }
 
         // Tracks whether any postMoveEvents attempt produced observable
@@ -3447,6 +3477,10 @@ extension MenuBarItemManager {
         let maxAttempts = max(1, maxMoveAttempts)
         for n in 1 ... maxAttempts {
             guard !Task.isCancelled else {
+                throw EventError.cannotComplete
+            }
+            if shouldProceed?() == false {
+                MenuBarItemManager.diagLog.debug("move: cancelled before attempt \(n) because caller state changed")
                 throw EventError.cannotComplete
             }
             do {
@@ -3468,7 +3502,12 @@ extension MenuBarItemManager {
                     item: item,
                     destination: destination,
                     on: resolvedDisplayID,
-                    warpCursorAfter: false // move() owns the single warp in its defer
+                    // When move() owns the long cursor-hide scope, it also
+                    // owns the single cursor restore. Frontmost-trigger moves
+                    // skip that long hide and let each event attempt restore.
+                    warpCursorAfter: !hideCursorAcrossAttempts,
+                    watchdogTimeout: watchdogTimeout,
+                    shouldProceed: shouldProceed
                 )
                 // postMoveEvents only returns without throwing when both
                 // waitForMoveEventResponse calls observed origin changes,
@@ -3484,12 +3523,20 @@ extension MenuBarItemManager {
                 MenuBarItemManager.diagLog.debug("Attempt \(n) events succeeded but item not at destination, retrying")
                 if n < maxAttempts {
                     try await waitForMoveOperationBuffer()
+                    if shouldProceed?() == false {
+                        MenuBarItemManager.diagLog.debug("move: cancelled after retry buffer because caller state changed")
+                        throw EventError.cannotComplete
+                    }
                     continue
                 }
             } catch {
                 MenuBarItemManager.diagLog.debug("Attempt \(n) failed: \(error)")
                 if n < maxAttempts {
                     try await waitForMoveOperationBuffer()
+                    if shouldProceed?() == false {
+                        MenuBarItemManager.diagLog.debug("move: cancelled after failed-attempt buffer because caller state changed")
+                        throw EventError.cannotComplete
+                    }
                     continue
                 }
                 if error is EventError {
@@ -3538,13 +3585,7 @@ extension MenuBarItemManager {
             acquiredSemaphore = true
         } catch is SimpleSemaphore.TimeoutError {
             MenuBarItemManager.diagLog.error("eventSemaphore timed out (3.5s) in postClickEvents for \(item.logString)")
-            await eventSemaphore.reset(to: 1)
-            do {
-                try await eventSemaphore.wait(timeout: .milliseconds(3500))
-                acquiredSemaphore = true
-            } catch is SimpleSemaphore.TimeoutError {
-                throw EventError.cannotComplete
-            }
+            throw EventError.cannotComplete
         }
         defer {
             if acquiredSemaphore {
@@ -6846,8 +6887,10 @@ extension MenuBarItemManager {
         withTagIdentifier tagIdentifier: String,
         toSection section: MenuBarSection.Name,
         requiredInputPause: Duration = .milliseconds(50),
+        inputPauseTimeout: Duration? = nil,
         watchdogTimeout: DispatchTimeInterval? = nil,
         maxMoveAttempts: Int = 8,
+        hideCursorAcrossAttempts: Bool = true,
         shouldProceed: (@MainActor () -> Bool)? = nil
     ) async -> Bool {
         guard let appState else { return false }
@@ -6886,13 +6929,6 @@ extension MenuBarItemManager {
             return false
         }
 
-        // Skip when the item already resides in the target section.
-        let displayID = Bridging.getActiveMenuBarDisplayID()
-        var context = CacheContext(controlItems: controlItems, displayID: displayID)
-        if context.findSection(for: target) == section {
-            return false
-        }
-
         // Fall back to the hidden section when always-hidden is requested
         // but unavailable (section disabled or no control item present).
         var resolvedSection = section
@@ -6900,6 +6936,13 @@ extension MenuBarItemManager {
            controlItems.alwaysHidden == nil || appState.settings.advanced.enableAlwaysHiddenSection == false
         {
             resolvedSection = .hidden
+        }
+
+        // Skip when the item already resides in the effective target section.
+        let displayID = Bridging.getActiveMenuBarDisplayID()
+        var context = CacheContext(controlItems: controlItems, displayID: displayID)
+        if context.findSection(for: target) == resolvedSection {
+            return false
         }
 
         let destination = LayoutReconciler.boundaryDestination(for: resolvedSection, controlItems: controlItems)
@@ -6910,8 +6953,10 @@ extension MenuBarItemManager {
                 to: destination,
                 on: displayID,
                 requiredInputPause: requiredInputPause,
+                inputPauseTimeout: inputPauseTimeout,
                 watchdogTimeout: watchdogTimeout,
                 maxMoveAttempts: maxMoveAttempts,
+                hideCursorAcrossAttempts: hideCursorAcrossAttempts,
                 shouldProceed: shouldProceed
             )
             MenuBarItemManager.diagLog.info("moveItem(trigger): moved \(target.logString) to \(resolvedSection.logString)")

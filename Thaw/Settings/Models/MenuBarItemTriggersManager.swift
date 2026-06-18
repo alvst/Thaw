@@ -6,6 +6,7 @@
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
+import AppKit
 import Combine
 import Foundation
 
@@ -232,7 +233,8 @@ final class MenuBarItemTriggersManager: ObservableObject {
             // once an item appears rather than getting stuck as "applied".
             guard trigger.allItemIdentifiers.contains(where: presentIdentifiers.contains) else { continue }
 
-            let reveal = trigger.shouldReveal(state: state, now: now)
+            let triggerState = effectiveState(for: trigger, base: state)
+            let reveal = trigger.shouldReveal(state: triggerState, now: now)
 
             if lastAppliedReveal[trigger.id] == reveal {
                 pendingApplyTasks[trigger.id]?.cancel()
@@ -241,9 +243,13 @@ final class MenuBarItemTriggersManager: ObservableObject {
             }
 
             if force {
-                pendingApplyTasks[trigger.id]?.cancel()
-                pendingApplyTasks[trigger.id] = nil
-                apply(trigger, reveal: reveal)
+                if shouldDebounceForcedApply(trigger) {
+                    scheduleDebouncedApply(for: trigger.id)
+                } else {
+                    pendingApplyTasks[trigger.id]?.cancel()
+                    pendingApplyTasks[trigger.id] = nil
+                    apply(trigger, reveal: reveal)
+                }
             } else {
                 scheduleDebouncedApply(for: trigger.id)
             }
@@ -289,7 +295,8 @@ final class MenuBarItemTriggersManager: ObservableObject {
             else {
                 return
             }
-            let reveal = trigger.shouldReveal(state: self.evaluationState)
+            let state = self.effectiveState(for: trigger, base: self.evaluationState)
+            let reveal = trigger.shouldReveal(state: state)
             guard self.lastAppliedReveal[triggerID] != reveal else { return }
             self.apply(trigger, reveal: reveal)
         }
@@ -338,19 +345,36 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         let presentIDs = Set(appState?.itemManager.itemCache.managedItems.map(\.tag.tagIdentifier) ?? [])
         guard current.allItemIdentifiers.contains(where: presentIDs.contains) else { return false }
-        return current.shouldReveal(state: evaluationState) == queuedReveal
+        let state = effectiveState(for: current, base: evaluationState)
+        return current.shouldReveal(state: state) == queuedReveal
     }
 
     private func moveOptions(for trigger: MenuBarItemTrigger) -> (
         requiredInputPause: Duration,
+        inputPauseTimeout: Duration?,
         watchdogTimeout: DispatchTimeInterval?,
-        maxMoveAttempts: Int
+        maxMoveAttempts: Int,
+        hideCursorAcrossAttempts: Bool
     ) {
         let isFrontmostDriven = trigger.allConditions.contains { $0.kind == .frontmostApp }
         if isFrontmostDriven {
-            return (.seconds(1), .seconds(2), 3)
+            return (.seconds(1), .seconds(3), .seconds(2), 3, false)
         }
-        return (.milliseconds(50), nil, 8)
+        return (.milliseconds(50), nil, nil, 8, true)
+    }
+
+    private func effectiveState(for trigger: MenuBarItemTrigger, base state: SystemState) -> SystemState {
+        guard trigger.allConditions.contains(where: { $0.kind == .frontmostApp }) else {
+            return state
+        }
+
+        var state = state
+        state.frontmostAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        return state
+    }
+
+    private func shouldDebounceForcedApply(_ trigger: MenuBarItemTrigger) -> Bool {
+        trigger.allConditions.contains { $0.kind == .frontmostApp }
     }
 
     /// Appends a batch of moves to the serial move chain so only one move
@@ -382,8 +406,10 @@ final class MenuBarItemTriggersManager: ObservableObject {
                     withTagIdentifier: identifier,
                     toSection: section,
                     requiredInputPause: options.requiredInputPause,
+                    inputPauseTimeout: options.inputPauseTimeout,
                     watchdogTimeout: options.watchdogTimeout,
                     maxMoveAttempts: options.maxMoveAttempts,
+                    hideCursorAcrossAttempts: options.hideCursorAcrossAttempts,
                     shouldProceed: { [weak self] in
                         self?.queuedMoveIsCurrent(for: trigger, reveal: reveal) ?? false
                     }
