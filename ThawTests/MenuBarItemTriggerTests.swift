@@ -381,6 +381,29 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(Defaults.stringArray(forKey: .triggerFeatureFlags) ?? [], [])
     }
 
+    @MainActor
+    func testAllOffMenuItemDefaultsHiddenAndPersists() {
+        let previous = Defaults.object(forKey: .showTriggerFeatureFlagsAllOffMenuItem)
+        defer {
+            if let previous {
+                Defaults.set(previous, forKey: .showTriggerFeatureFlagsAllOffMenuItem)
+            } else {
+                Defaults.removeObject(forKey: .showTriggerFeatureFlagsAllOffMenuItem)
+            }
+        }
+
+        Defaults.removeObject(forKey: .showTriggerFeatureFlagsAllOffMenuItem)
+        let manager = TriggerFeatureFlagsManager()
+        XCTAssertFalse(manager.showsAllOffInMenuBarMenu)
+
+        manager.showsAllOffInMenuBarMenu = true
+        XCTAssertTrue(Defaults.bool(forKey: .showTriggerFeatureFlagsAllOffMenuItem))
+        XCTAssertTrue(TriggerFeatureFlagsManager().showsAllOffInMenuBarMenu)
+
+        manager.showsAllOffInMenuBarMenu = false
+        XCTAssertFalse(Defaults.bool(forKey: .showTriggerFeatureFlagsAllOffMenuItem))
+    }
+
     // MARK: - Compound conditions
 
     func testCompoundAllRequiresEveryCondition() {

@@ -657,20 +657,22 @@ final class ControlItem {
 
         menu.addItem(.separator())
 
-        let allTriggerFeaturesOffItem = NSMenuItem(
-            title: String(localized: "All Trigger Features Off"),
-            action: #selector(disableAllTriggerFeatureFlags),
-            keyEquivalent: ""
-        )
-        allTriggerFeaturesOffItem.image = NSImage(
-            systemSymbolName: "power",
-            accessibilityDescription: "All Trigger Features Off"
-        )
-        allTriggerFeaturesOffItem.target = self
-        allTriggerFeaturesOffItem.isEnabled = appState.settings.triggers.featureFlags.hasEnabledFlags
-        menu.addItem(allTriggerFeaturesOffItem)
+        if appState.settings.triggers.featureFlags.showsAllOffInMenuBarMenu {
+            let allTriggerFeaturesOffItem = NSMenuItem(
+                title: String(localized: "All Trigger Features Off"),
+                action: #selector(disableAllTriggerFeatureFlags),
+                keyEquivalent: ""
+            )
+            allTriggerFeaturesOffItem.image = NSImage(
+                systemSymbolName: "power",
+                accessibilityDescription: "All Trigger Features Off"
+            )
+            allTriggerFeaturesOffItem.target = self
+            allTriggerFeaturesOffItem.isEnabled = appState.settings.triggers.featureFlags.hasEnabledFlags
+            menu.addItem(allTriggerFeaturesOffItem)
 
-        menu.addItem(.separator())
+            menu.addItem(.separator())
+        }
 
         // Add items to toggle the hidden and always-hidden sections.
         for name: MenuBarSection.Name in [.hidden, .alwaysHidden] {

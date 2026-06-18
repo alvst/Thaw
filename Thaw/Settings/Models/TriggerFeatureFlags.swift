@@ -118,6 +118,15 @@ final class TriggerFeatureFlagsManager: ObservableObject {
         }
     }
 
+    /// Whether the emergency "All Trigger Features Off" item is shown in the
+    /// menu bar dropdown. Defaults off so the dropdown stays uncluttered until
+    /// the developer explicitly opts into the emergency escape hatch.
+    @Published var showsAllOffInMenuBarMenu = Defaults.bool(forKey: .showTriggerFeatureFlagsAllOffMenuItem) {
+        didSet {
+            Defaults.set(showsAllOffInMenuBarMenu, forKey: .showTriggerFeatureFlagsAllOffMenuItem)
+        }
+    }
+
     private var suppressPersist = false
 
     init() {

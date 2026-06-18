@@ -72,6 +72,18 @@ struct DeveloperSettingsPane: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                    .padding(.vertical, 4)
+                Toggle(isOn: $flags.showsAllOffInMenuBarMenu) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show All Off in menu bar dropdown")
+                        Text("Adds the emergency trigger-feature shutoff to the three-dot menu. Keep this off unless a trigger source is disrupting normal computer use.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(8)
