@@ -16,13 +16,13 @@ import Cocoa
 /// The assertion is an **allowlist**: every menu bar item whose owner is not
 /// listed is hidden and the bar reflows. Thaw's model is a *deny* set (the
 /// items the user chose to hide), so this backend inverts it — allow every
-/// running app except the owners of hidden items, and keep all Apple system
-/// items.
+/// running app except the owners of hidden items, keep all Apple core system
+/// items, and preserve MenuBarAgent extras by their logical bundle IDs.
 ///
-/// Granularity is per owning app: the assertion allowlist keys on bundle
-/// identifiers, so hiding *any* item of an app hides *all* of that app's items
-/// as a group — there is no per-item control at this layer. In practice almost
-/// every app vends a single menu bar item, so this matches user expectations.
+/// Granularity for third-party items is per owning app: the assertion allowlist
+/// keys on bundle identifiers, so hiding *any* item of an app hides *all* of
+/// that app's items as a group. In practice almost every app vends a single
+/// menu bar item, so this matches user expectations.
 ///
 /// For the rare multi-item app, this backend errs on the side of *not* hiding:
 /// a bundle is concealed only when none of its currently-enumerated items are
@@ -51,6 +51,11 @@ final class AssessmentModeBackend {
         var allowedSystemItems: [NSNumber] {
             switch self {
             case .defaultRange:
+                // MBSystemItemIdentifier has exactly 9 cases, raw values 0...8:
+                // battery, Bluetooth, clock, displays, keyboard, volume, Wi-Fi,
+                // screen mirroring, and the primary BentoBox. Menu extras such
+                // as AirDrop are not in this enum; Assessment Mode matches them
+                // by logical com.apple.menuextra.* IDs instead.
                 (0...8).map { NSNumber(value: $0) }
             case .expandedRange:
                 (0...32).map { NSNumber(value: $0) }
@@ -72,6 +77,13 @@ final class AssessmentModeBackend {
     }
 
     static func diagnosticSystemItemsMode(rawValue: String?) -> DiagnosticSystemItemsMode {
+        // macOS 27: .defaultRange (0...8) is the proven optimum. The 2026-06-18
+        // probe exhausted every systemItems setting: 0...8 keeps the 5 core CC
+        // modules but always collateral-hides the 4 non-core extras
+        // (user/now-playing/focusmode/airdrop); 0...32 is identical (raw values >8
+        // map to nothing); [] (.bundleOnly) hides ALL 9. The 4 extras have no slot
+        // in either allowlist axis, so the mechanism cannot preserve them — accept
+        // collateral. See [[macos27-system-item-hiding-approach]].
         guard let rawValue, !rawValue.isEmpty else {
             return .defaultRange
         }
