@@ -38,12 +38,49 @@ final class AssessmentModeBackend {
         ThawAssessmentModeHidingAvailable()
     }
 
-    /// macOS 27 exposes nine Apple system-item identifiers (raw values 0…8).
-    /// Passing all of them keeps every Control Center / system item visible; an
-    /// empty list would hide them. (System-item hiding is intentionally out of
-    /// scope for now — Thaw hides third-party items; system items are managed in
-    /// System Settings.)
-    private static let allSystemItems: [NSNumber] = (0...8).map { NSNumber(value: $0) }
+    /// Diagnostic modes for the private Assessment Mode system-item allowlist.
+    ///
+    /// The default preserves Thaw's current macOS 27 behavior. The expanded and
+    /// bundle-only modes are hidden expert probes for isolating whether Apple's
+    /// system-item allowlist is involved in status-item scene loss.
+    enum DiagnosticSystemItemsMode: String {
+        case defaultRange = "default"
+        case expandedRange = "expanded"
+        case bundleOnly = "bundleOnly"
+
+        var allowedSystemItems: [NSNumber] {
+            switch self {
+            case .defaultRange:
+                (0...8).map { NSNumber(value: $0) }
+            case .expandedRange:
+                (0...32).map { NSNumber(value: $0) }
+            case .bundleOnly:
+                []
+            }
+        }
+
+        var logDescription: String {
+            switch self {
+            case .defaultRange:
+                "default(0...8)"
+            case .expandedRange:
+                "expanded(0...32)"
+            case .bundleOnly:
+                "bundleOnly(empty)"
+            }
+        }
+    }
+
+    static func diagnosticSystemItemsMode(rawValue: String?) -> DiagnosticSystemItemsMode {
+        guard let rawValue, !rawValue.isEmpty else {
+            return .defaultRange
+        }
+        return DiagnosticSystemItemsMode(rawValue: rawValue) ?? .defaultRange
+    }
+
+    private static var diagnosticSystemItemsMode: DiagnosticSystemItemsMode {
+        diagnosticSystemItemsMode(rawValue: Defaults.string(forKey: .diagnosticAssessmentModeSystemItems))
+    }
 
     private let diagLog = DiagLog(category: "AssessmentModeBackend")
 
@@ -55,6 +92,9 @@ final class AssessmentModeBackend {
 
     /// The allowed-app bundle IDs baked into the currently-active assertion.
     private var appliedAllowed: Set<String> = []
+
+    /// The system-item allowlist mode baked into the currently-active assertion.
+    private var appliedSystemItemsMode: DiagnosticSystemItemsMode?
 
     /// Learned `uniqueIdentifier → owning bundle ID` map. A concealed item drops
     /// out of AX enumeration entirely (the assertion removes it), so it would no
@@ -76,11 +116,7 @@ final class AssessmentModeBackend {
     private var lastFailedAllowed: Set<String>?
 
     static var protectedBundleIDs: Set<String> {
-        var bundleIDs = Set<String>()
-        if let ownBundleID = Bundle.main.bundleIdentifier {
-            bundleIDs.insert(ownBundleID)
-        }
-        return bundleIDs
+        Constants.thawOwnedBundleIdentifiers
     }
 
     private var protectedBundleIDs: Set<String> {
@@ -104,8 +140,7 @@ final class AssessmentModeBackend {
     }
 
     private func isOwnAppBundleID(_ bundleID: String?) -> Bool {
-        guard let bundleID else { return false }
-        return protectedBundleIDs.contains(bundleID)
+        Constants.isThawOwnedBundleIdentifier(bundleID)
     }
 
     private func isOwnAppItem(_ item: MenuBarItem) -> Bool {
@@ -147,9 +182,7 @@ final class AssessmentModeBackend {
         var bundlesWithVisibleItem = Set<String>()
         for item in allItems where !concealed.contains(item.uniqueIdentifier) {
             guard !isOwnAppItem(item) else {
-                if let ownBundleID = Bundle.main.bundleIdentifier {
-                    bundlesWithVisibleItem.insert(ownBundleID)
-                }
+                bundlesWithVisibleItem.formUnion(protectedBundleIDs)
                 continue
             }
             if let bundleID = item.sourceApplication?.bundleIdentifier {
@@ -196,10 +229,10 @@ final class AssessmentModeBackend {
         }
 
         // Ground-truth self-check: does the allowlist we're about to apply keep
-        // Thaw's own item? If this logs `allowed=true concealed=false` and the
-        // icon is still hidden, the assertion does not honor the asserting app's
-        // own bundle — a mechanism limitation, not an allowlist bug.
-        if let ownBundleID = Bundle.main.bundleIdentifier {
+        // every Thaw-owned icon host? If these log `allowed=true concealed=false`
+        // and the icon is still hidden, the assertion is not honoring that
+        // protected owner — a mechanism limitation, not an allowlist bug.
+        for ownBundleID in protectedBundleIDs.sorted() {
             let running = NSWorkspace.shared.runningApplications.contains {
                 $0.bundleIdentifier == ownBundleID
             }
@@ -216,9 +249,11 @@ final class AssessmentModeBackend {
         //     hidden by the allowlist).
         // Apps merely quitting leave harmless stale entries in the allowlist, so
         // a pure shrink of the allowed set is ignored — no reflow needed.
+        let systemItemsMode = Self.diagnosticSystemItemsMode
         let concealedChanged = concealedBundleIDs != appliedConcealed
+        let systemItemsModeChanged = systemItemsMode != appliedSystemItemsMode
         let newlyAppeared = !allowedSet.subtracting(appliedAllowed).isEmpty
-        guard handle == nil || concealedChanged || newlyAppeared else { return false }
+        guard handle == nil || concealedChanged || systemItemsModeChanged || newlyAppeared else { return false }
 
         // Don't re-activate the exact configuration that just failed
         // asynchronously — that would hot-loop on the 1s timer. Any change to the
@@ -232,10 +267,16 @@ final class AssessmentModeBackend {
         // Re-activate with the new allowlist. The previous assertion is dropped
         // first so the server applies a single, current restriction.
         let allowedBundleIDs = allowedSet.sorted()
+        let allowedSystemItems = systemItemsMode.allowedSystemItems
         activationGeneration += 1
         let generation = activationGeneration
         let attemptedAllowed = allowedSet
-        let newHandle = ThawAssessmentModeHidingActivate(allowedBundleIDs, Self.allSystemItems) { [weak self] in
+        diagLog.info(
+            "applying restriction: systemItemsMode=\(systemItemsMode.logDescription), " +
+            "systemItems=\(allowedSystemItems.map(\.stringValue)), " +
+            "concealedBundles=\(concealedBundleIDs.sorted()), allowedBundles=\(allowedBundleIDs.count)"
+        )
+        let newHandle = ThawAssessmentModeHidingActivate(allowedBundleIDs, allowedSystemItems) { [weak self] in
             // Dispatched to the main queue by the ObjC wrapper, so MainActor
             // isolation holds at runtime even though the block type is not.
             MainActor.assumeIsolated {
@@ -250,6 +291,7 @@ final class AssessmentModeBackend {
                 self.handle = nil
                 self.appliedConcealed = []
                 self.appliedAllowed = []
+                self.appliedSystemItemsMode = nil
                 self.lastFailedAllowed = attemptedAllowed
             }
         }
@@ -259,7 +301,11 @@ final class AssessmentModeBackend {
         handle = newHandle
         appliedConcealed = concealedBundleIDs
         appliedAllowed = allowedSet
-        diagLog.info("applied restriction: concealing \(concealedBundleIDs.count) app(s), allowing \(allowedBundleIDs.count)")
+        appliedSystemItemsMode = systemItemsMode
+        diagLog.info(
+            "applied restriction: concealing \(concealedBundleIDs.count) app(s), " +
+            "allowing \(allowedBundleIDs.count), systemItemsMode=\(systemItemsMode.logDescription)"
+        )
         return true
     }
 
@@ -269,6 +315,7 @@ final class AssessmentModeBackend {
         handle = nil
         appliedConcealed = []
         appliedAllowed = []
+        appliedSystemItemsMode = nil
         diagLog.info("restriction reset; all items revealed")
         return true
     }
