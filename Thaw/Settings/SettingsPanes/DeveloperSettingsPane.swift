@@ -17,8 +17,6 @@ import SwiftUI
 struct DeveloperSettingsPane: View {
     @ObservedObject private var flags: TriggerFeatureFlagsManager
 
-    private let menuBarManager: MenuBarManager
-
     // Plain reference (not observed): used to read Location authorization
     // status and to (re)request it for the Wi-Fi SSID diagnostic.
     private let systemMonitor: SystemStateMonitor
@@ -30,9 +28,8 @@ struct DeveloperSettingsPane: View {
 
     private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
-    init(manager: MenuBarItemTriggersManager, menuBarManager: MenuBarManager) {
+    init(manager: MenuBarItemTriggersManager) {
         flags = manager.featureFlags
-        self.menuBarManager = menuBarManager
         systemMonitor = manager.systemMonitor
     }
 
@@ -40,7 +37,6 @@ struct DeveloperSettingsPane: View {
         IceForm {
             introSection
             flagsSection
-            menuBarControlsSection
             liveStateSection
         }
         .onAppear {
@@ -61,8 +57,17 @@ struct DeveloperSettingsPane: View {
     private var introSection: some View {
         IceSection(options: [.isBordered]) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Trigger Feature Flags")
-                    .font(.headline)
+                HStack {
+                    Text("Trigger Feature Flags")
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        flags.disableAll()
+                    } label: {
+                        Label("All Off", systemImage: "power")
+                    }
+                    .disabled(!flags.hasEnabledFlags)
+                }
                 Text("Enable experimental trigger sources one at a time. Each flag turns on its condition in the Triggers pane and starts its background monitor. Battery and power conditions are always available.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -111,27 +116,6 @@ struct DeveloperSettingsPane: View {
         }
         .toggleStyle(.switch)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var menuBarControlsSection: some View {
-        IceSection("Menu Bar Controls", options: [.isBordered]) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("All Off")
-                        .font(.callout)
-                    Text("Hide all expanded sections and close the \(Constants.displayName) Bar.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    menuBarManager.hideAllSections()
-                } label: {
-                    Label("All Off", systemImage: "power")
-                }
-            }
-            .padding(8)
-        }
     }
 
     // MARK: Live state

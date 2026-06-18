@@ -131,6 +131,11 @@ final class TriggerFeatureFlagsManager: ObservableObject {
         enabledRawValues.contains(feature.rawValue)
     }
 
+    /// Whether any trigger feature flag is currently enabled.
+    var hasEnabledFlags: Bool {
+        !enabledRawValues.isEmpty
+    }
+
     /// Enables or disables the given feature.
     func setEnabled(_ feature: TriggerFeature, _ isOn: Bool) {
         if isOn {
@@ -138,6 +143,11 @@ final class TriggerFeatureFlagsManager: ObservableObject {
         } else {
             enabledRawValues.remove(feature.rawValue)
         }
+    }
+
+    /// Disables every trigger feature flag.
+    func disableAll() {
+        enabledRawValues.removeAll()
     }
 
     /// A binding suitable for a SwiftUI toggle.

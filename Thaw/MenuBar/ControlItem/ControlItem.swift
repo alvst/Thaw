@@ -657,14 +657,18 @@ final class ControlItem {
 
         menu.addItem(.separator())
 
-        let allOffItem = NSMenuItem(
-            title: String(localized: "All Off"),
-            action: #selector(hideAllSections),
+        let allTriggerFeaturesOffItem = NSMenuItem(
+            title: String(localized: "All Trigger Features Off"),
+            action: #selector(disableAllTriggerFeatureFlags),
             keyEquivalent: ""
         )
-        allOffItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "All Off")
-        allOffItem.target = self
-        menu.addItem(allOffItem)
+        allTriggerFeaturesOffItem.image = NSImage(
+            systemSymbolName: "power",
+            accessibilityDescription: "All Trigger Features Off"
+        )
+        allTriggerFeaturesOffItem.target = self
+        allTriggerFeaturesOffItem.isEnabled = appState.settings.triggers.featureFlags.hasEnabledFlags
+        menu.addItem(allTriggerFeaturesOffItem)
 
         menu.addItem(.separator())
 
@@ -811,9 +815,9 @@ final class ControlItem {
         section.toggle()
     }
 
-    /// Hides all expanded menu bar sections.
-    @objc private func hideAllSections() {
-        appState?.menuBarManager.hideAllSections()
+    /// Disables every trigger feature flag.
+    @objc private func disableAllTriggerFeatureFlags() {
+        appState?.settings.triggers.featureFlags.disableAll()
     }
 
     /// Opens the menu bar search panel.

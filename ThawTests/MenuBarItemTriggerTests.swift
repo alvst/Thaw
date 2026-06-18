@@ -355,6 +355,32 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(TriggerConditionKind.imageChanged.requiredFeature, .imageComparison)
     }
 
+    @MainActor
+    func testDisableAllFeatureFlags() {
+        let previous = Defaults.stringArray(forKey: .triggerFeatureFlags)
+        defer {
+            if let previous {
+                Defaults.set(previous, forKey: .triggerFeatureFlags)
+            } else {
+                Defaults.removeObject(forKey: .triggerFeatureFlags)
+            }
+        }
+
+        Defaults.removeObject(forKey: .triggerFeatureFlags)
+        let manager = TriggerFeatureFlagsManager()
+
+        manager.setEnabled(.frontmostApp, true)
+        manager.setEnabled(.imageComparison, true)
+        XCTAssertTrue(manager.hasEnabledFlags)
+
+        manager.disableAll()
+
+        XCTAssertFalse(manager.hasEnabledFlags)
+        XCTAssertFalse(manager.isEnabled(.frontmostApp))
+        XCTAssertFalse(manager.isEnabled(.imageComparison))
+        XCTAssertEqual(Defaults.stringArray(forKey: .triggerFeatureFlags) ?? [], [])
+    }
+
     // MARK: - Compound conditions
 
     func testCompoundAllRequiresEveryCondition() {
