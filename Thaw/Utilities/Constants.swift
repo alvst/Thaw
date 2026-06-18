@@ -30,6 +30,36 @@ enum Constants {
 
     // swiftlint:enable force_unwrapping
 
+    // MARK: - Thaw-owned menu bar identity
+
+    /// Bundle identifiers that can own Thaw's menu bar control surface.
+    ///
+    /// macOS 27 normally reports the live icon as `com.stonerl.Thaw`, but some
+    /// AX/defaults paths have exposed it through a MenuBarHost-style owner. Keep
+    /// both protected so hiding another app can never remove Thaw's recovery UI.
+    static var thawOwnedBundleIdentifiers: Set<String> {
+        [
+            bundleIdentifier,
+            "\(bundleIdentifier).MenuBarHost",
+        ]
+    }
+
+    static func isThawOwnedBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return thawOwnedBundleIdentifiers.contains(bundleIdentifier)
+    }
+
+    static func isThawOwnedAssignmentIdentifier(_ identifier: String) -> Bool {
+        if identifier.hasPrefix("Thaw.ControlItem.") {
+            return true
+        }
+
+        return thawOwnedBundleIdentifiers.contains { bundleIdentifier in
+            identifier == bundleIdentifier ||
+                identifier.hasPrefix("\(bundleIdentifier):")
+        }
+    }
+
     // MARK: - OS capabilities
 
     /// Whether the *legacy* (reflow-based) menu bar section hiding is supported
