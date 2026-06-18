@@ -130,7 +130,10 @@ final class ControlItem {
             let cached = ControlItemDefaults[.preferredPosition, autosaveName]
             NSStatusBar.system.removeStatusItem(statusItem)
             ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: autosaveName)
-            if !isSectionDivider {
+            if ControlItemDefaults.shouldRestorePreferredPositionAfterRemoval(
+                autosaveName: autosaveName,
+                isSectionDivider: isSectionDivider
+            ) {
                 ControlItemDefaults[.preferredPosition, autosaveName] = cached
             }
         }
@@ -547,7 +550,10 @@ final class ControlItem {
         let cached = ControlItemDefaults[.preferredPosition, autosaveName]
         statusItem.isVisible = false
         ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: autosaveName)
-        if !isSectionDivider {
+        if ControlItemDefaults.shouldRestorePreferredPositionAfterRemoval(
+            autosaveName: autosaveName,
+            isSectionDivider: isSectionDivider
+        ) {
             ControlItemDefaults[.preferredPosition, autosaveName] = cached
         }
     }
@@ -585,6 +591,72 @@ final class ControlItem {
             let size = withMutableCopy(of: window.frame.size) { $0.width = 1 }
             window.setContentSize(size)
         }
+    }
+
+    /// Reasserts the visible icon's AppKit state after macOS 27 applies a menu bar
+    /// visibility restriction. This is intentionally lighter than unregistering and
+    /// re-registering the status item: the item remains owned by the main app, but
+    /// its visibility bits, length, constraint, and image are refreshed after
+    /// MenuBarAgent has reflowed the bar.
+    func restoreVisibleIconAfterRestrictionChange() {
+        guard #available(macOS 27, *), identifier == .visible else {
+            return
+        }
+
+        ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: identifier.rawValue)
+        statusItem.isVisible = true
+
+        guard appState?.settings.general.showIceIcon == true else {
+            hideIceIconCompletely()
+            return
+        }
+
+        constraint?.isActive = true
+        statusItem.length = identifier.length(for: state)
+        updateStatusItem()
+    }
+
+    /// Returns a compact AppKit/status-item state snapshot for diagnostics.
+    func diagnosticStateDescription() -> String {
+        let autosaveName = statusItem.autosaveName as String
+        let button = statusItem.button
+        let window = button?.window ?? window
+        let frameDescription = window.map { NSStringFromRect($0.frame) } ?? "nil"
+        let storedVisible: String = ControlItemDefaults[.visible, autosaveName].map(String.init) ?? "nil"
+        let storedVisibleCC: String = ControlItemDefaults[.visibleCC, autosaveName].map(String.init) ?? "nil"
+        let storedPosition: String = ControlItemDefaults[.preferredPosition, autosaveName].map(String.init) ?? "nil"
+
+        // Identity fields MenuBarAgent may key the visibility-restriction
+        // allowlist on. MenuBarAgent logs "No server elements for status item:
+        // nil" for our items, so log everything Thaw exposes to compare against a
+        // known-good app's item.
+        let buttonIdentifier = button?.identifier?.rawValue ?? "nil"
+        let rawA11yID = button?.accessibilityIdentifier()
+        let buttonA11yID = (rawA11yID == nil || rawA11yID?.isEmpty == true) ? "nil" : (rawA11yID ?? "nil")
+        let windowIdentifier = window?.identifier?.rawValue ?? "nil"
+        let bundleID = Bundle.main.bundleIdentifier ?? "nil"
+
+        return [
+            "id=\(identifier.rawValue)",
+            "autosaveName=\(autosaveName)",
+            "buttonID=\(buttonIdentifier)",
+            "buttonA11yID=\(buttonA11yID)",
+            "windowID=\(windowIdentifier)",
+            "bundleID=\(bundleID)",
+            "state=\(state)",
+            "statusVisible=\(statusItem.isVisible)",
+            "length=\(statusItem.length)",
+            "buttonExists=\(button != nil)",
+            "buttonEnabled=\(button?.isEnabled.description ?? "nil")",
+            "buttonAlpha=\(button.map { "\($0.alphaValue)" } ?? "nil")",
+            "appearsDisabled=\(button?.appearsDisabled.description ?? "nil")",
+            "hasImage=\((button?.image) != nil)",
+            "windowNumber=\(window.map { "\($0.windowNumber)" } ?? "nil")",
+            "windowFrame=\(frameDescription)",
+            "defaultsVisible=\(storedVisible)",
+            "defaultsVisibleCC=\(storedVisibleCC)",
+            "defaultsPreferredPosition=\(storedPosition)",
+        ].joined(separator: " ")
     }
 
     /// Performs the control item's action.
@@ -939,6 +1011,11 @@ enum ControlItemDefaults {
     fileprivate static func preflightSetup(for controlItem: ControlItem) {
         let autosaveName = controlItem.identifier.rawValue
 
+        if #available(macOS 27, *), controlItem.identifier == .visible {
+            restoreVisibilityIfNeeded(autosaveName: autosaveName)
+            return
+        }
+
         // Visible and hidden control items should be added before
         // existing items in the status bar.
         if ControlItemDefaults[.preferredPosition, autosaveName] == nil {
@@ -991,6 +1068,26 @@ enum ControlItemDefaults {
         }
         ControlItemDefaults[.visible, autosaveName] = true
         ControlItemDefaults[.visibleCC, autosaveName] = true
+        if let position = ControlItemDefaults[.preferredPosition, autosaveName], position <= 0 {
+            ControlItemDefaults[.preferredPosition, autosaveName] = nil
+        }
+    }
+
+    static func shouldRestorePreferredPositionAfterRemoval(
+        autosaveName: String,
+        isSectionDivider: Bool
+    ) -> Bool {
+        guard !isSectionDivider else {
+            return false
+        }
+
+        if #available(macOS 27, *),
+           autosaveName == ControlItem.Identifier.visible.rawValue
+        {
+            return false
+        }
+
+        return true
     }
 
     /// Resets chevron section divider positions to their defaults.
