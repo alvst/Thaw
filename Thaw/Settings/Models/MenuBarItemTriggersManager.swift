@@ -321,17 +321,50 @@ final class MenuBarItemTriggersManager: ObservableObject {
 
         let section = reveal ? trigger.revealSection : trigger.hideSection
         diagLog.debug("Trigger \(trigger.displayName) reveal=\(reveal); moving \(targets.count) item(s) to \(section.logString)")
-        enqueueMoves(targets, to: section)
+        enqueueMoves(for: trigger, reveal: reveal, identifiers: targets, to: section)
+    }
+
+    /// Returns whether a queued move still matches the current trigger config
+    /// and current system state.
+    private func queuedMoveIsCurrent(for queuedTrigger: MenuBarItemTrigger, reveal queuedReveal: Bool) -> Bool {
+        guard
+            let current = triggers.first(where: { $0.id == queuedTrigger.id }),
+            current == queuedTrigger,
+            current.isEnabled,
+            isAvailable(current)
+        else {
+            return false
+        }
+
+        let presentIDs = Set(appState?.itemManager.itemCache.managedItems.map(\.tag.tagIdentifier) ?? [])
+        guard current.allItemIdentifiers.contains(where: presentIDs.contains) else { return false }
+        return current.shouldReveal(state: evaluationState) == queuedReveal
     }
 
     /// Appends a batch of moves to the serial move chain so only one move
-    /// runs at a time, app-wide, regardless of how many triggers fire.
-    private func enqueueMoves(_ identifiers: [String], to section: MenuBarSection.Name) {
+    /// runs at a time, app-wide, regardless of how many triggers fire. Each
+    /// queued batch revalidates immediately before moving, because frontmost
+    /// app changes can enqueue opposite moves while an earlier synthetic drag
+    /// is still waiting behind the chain.
+    private func enqueueMoves(
+        for trigger: MenuBarItemTrigger,
+        reveal: Bool,
+        identifiers: [String],
+        to section: MenuBarSection.Name
+    ) {
         let previous = moveChain
         moveChain = Task { @MainActor [weak self] in
             _ = await previous.value
             guard let self, let itemManager = self.appState?.itemManager else { return }
+            guard self.queuedMoveIsCurrent(for: trigger, reveal: reveal) else {
+                self.diagLog.debug("Skipping stale trigger move for \(trigger.displayName)")
+                return
+            }
             for identifier in identifiers {
+                guard self.queuedMoveIsCurrent(for: trigger, reveal: reveal) else {
+                    self.diagLog.debug("Stopping stale trigger move batch for \(trigger.displayName)")
+                    return
+                }
                 await itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
             }
         }

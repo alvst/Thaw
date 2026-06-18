@@ -3395,6 +3395,9 @@
     "Add Trigger" : {
 
     },
+    "Adds the emergency trigger-feature shutoff to the three-dot menu. Keep this off unless a trigger source is disrupting normal computer use." : {
+
+    },
     "Advanced" : {
       "comment" : "The \"Advanced\" section in the \"Settings\" interface.",
       "localizations" : {
@@ -3514,8 +3517,14 @@
         }
       }
     },
+    "All Off" : {
+
+    },
     "All profiles" : {
       "comment" : "Picker option: save spacing changes to every profile when relaunch confirmations are disabled."
+    },
+    "All Trigger Features Off" : {
+
     },
     "Allow" : {
       "comment" : "Button title for allowing the app to control Thaw settings.",
@@ -37136,6 +37145,9 @@
           }
         }
       }
+    },
+    "Show All Off in menu bar dropdown" : {
+
     },
     "Show all sections when ⌘ Command + dragging menu bar items" : {
       "comment" : "A toggle that enables or disables showing all menu bar sections when dragging them with ⌘ Command.",

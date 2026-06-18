@@ -355,6 +355,10 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(TriggerConditionKind.imageChanged.requiredFeature, .imageComparison)
     }
 
+    func testFrontmostAppUsesLongerSettleInterval() {
+        XCTAssertEqual(TriggerConditionKind.frontmostApp.settleInterval, .seconds(3))
+    }
+
     @MainActor
     func testDisableAllFeatureFlags() {
         let previous = Defaults.stringArray(forKey: .triggerFeatureFlags)
