@@ -151,6 +151,54 @@ enum ScreenCapture {
         let scale: CGFloat
     }
 
+    @available(macOS 27, *)
+    private static func menuBarHostingWindowCandidates(
+        in content: SCShareableContent,
+        displayFrame: CGRect
+    ) -> [SCWindow] {
+        content.windows.filter { w in
+            w.owningApplication?.bundleIdentifier == SharedConstants.menuBarHostingBundleID
+                && w.frame.height <= 40
+                && w.frame.width > displayFrame.width * 0.8
+                && abs(w.frame.minX - displayFrame.minX) < 2
+                && abs(w.frame.minY - displayFrame.minY) < 2
+        }
+    }
+
+    @available(macOS 27, *)
+    static func logMenuBarHostingWindowCandidates(
+        displayID: CGDirectDisplayID,
+        reason: String
+    ) async {
+        guard Defaults.bool(forKey: .diagnosticAssessmentModeSceneProbes) else {
+            return
+        }
+
+        let content: SCShareableContent
+        do {
+            content = try await getShareableContent()
+        } catch {
+            diagLog.error("hostingCandidates[\(reason)]: SCShareableContent failed: \(error)")
+            return
+        }
+
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            diagLog.warning("hostingCandidates[\(reason)]: display \(displayID) not found")
+            return
+        }
+
+        let candidates = menuBarHostingWindowCandidates(in: content, displayFrame: display.frame)
+        let descriptions = candidates
+            .sorted { $0.windowID < $1.windowID }
+            .map { window in
+                "wid=\(window.windowID) frame=\(NSStringFromRect(window.frame))"
+            }
+        diagLog.info(
+            "hostingCandidates[\(reason)]: displayID=\(displayID) " +
+            "count=\(candidates.count) \(descriptions.joined(separator: " | "))"
+        )
+    }
+
     /// Captures `MenuBarAgent`'s menu bar hosting window for a display.
     ///
     /// On macOS 27 every status item is composited as a subitem inside a single
@@ -190,14 +238,7 @@ enum ScreenCapture {
         // bundle ID excludes the per-app status-item proxy windows (which are
         // also full-width and off-screen). Prefer the highest windowID (most
         // recently realized) when more than one matches the display.
-        let window = content.windows
-            .filter { w in
-                w.owningApplication?.bundleIdentifier == SharedConstants.menuBarHostingBundleID
-                    && w.frame.height <= 40
-                    && w.frame.width > displayFrame.width * 0.8
-                    && abs(w.frame.minX - displayFrame.minX) < 2
-                    && abs(w.frame.minY - displayFrame.minY) < 2
-            }
+        let window = menuBarHostingWindowCandidates(in: content, displayFrame: displayFrame)
             .max { $0.windowID < $1.windowID }
 
         guard let window else {
