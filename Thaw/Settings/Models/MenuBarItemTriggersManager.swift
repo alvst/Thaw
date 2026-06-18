@@ -341,6 +341,18 @@ final class MenuBarItemTriggersManager: ObservableObject {
         return current.shouldReveal(state: evaluationState) == queuedReveal
     }
 
+    private func moveOptions(for trigger: MenuBarItemTrigger) -> (
+        requiredInputPause: Duration,
+        watchdogTimeout: DispatchTimeInterval?,
+        maxMoveAttempts: Int
+    ) {
+        let isFrontmostDriven = trigger.allConditions.contains { $0.kind == .frontmostApp }
+        if isFrontmostDriven {
+            return (.seconds(1), .seconds(2), 3)
+        }
+        return (.milliseconds(50), nil, 8)
+    }
+
     /// Appends a batch of moves to the serial move chain so only one move
     /// runs at a time, app-wide, regardless of how many triggers fire. Each
     /// queued batch revalidates immediately before moving, because frontmost
@@ -360,12 +372,22 @@ final class MenuBarItemTriggersManager: ObservableObject {
                 self.diagLog.debug("Skipping stale trigger move for \(trigger.displayName)")
                 return
             }
+            let options = self.moveOptions(for: trigger)
             for identifier in identifiers {
                 guard self.queuedMoveIsCurrent(for: trigger, reveal: reveal) else {
                     self.diagLog.debug("Stopping stale trigger move batch for \(trigger.displayName)")
                     return
                 }
-                await itemManager.moveItem(withTagIdentifier: identifier, toSection: section)
+                await itemManager.moveItem(
+                    withTagIdentifier: identifier,
+                    toSection: section,
+                    requiredInputPause: options.requiredInputPause,
+                    watchdogTimeout: options.watchdogTimeout,
+                    maxMoveAttempts: options.maxMoveAttempts,
+                    shouldProceed: { [weak self] in
+                        self?.queuedMoveIsCurrent(for: trigger, reveal: reveal) ?? false
+                    }
+                )
             }
         }
     }

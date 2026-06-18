@@ -2404,11 +2404,11 @@ extension MenuBarItemManager {
     }
 
     /// Waits asynchronously for the user to pause input.
-    private nonisolated func waitForUserToPauseInput() async throws {
+    private nonisolated func waitForUserToPauseInput(for duration: Duration = .milliseconds(50)) async throws {
         let waitTask = Task {
             while true {
                 try Task.checkCancellation()
-                if hasUserPausedInput(for: .milliseconds(50)) {
+                if hasUserPausedInput(for: duration) {
                     break
                 }
                 try await Task.sleep(for: .milliseconds(50))
@@ -3343,8 +3343,10 @@ extension MenuBarItemManager {
         to destination: MoveDestination,
         on displayID: CGDirectDisplayID? = nil,
         skipInputPause: Bool = false,
+        requiredInputPause: Duration = .milliseconds(50),
         watchdogTimeout: DispatchTimeInterval? = nil,
-        maxMoveAttempts: Int = 8
+        maxMoveAttempts: Int = 8,
+        shouldProceed: (@MainActor () -> Bool)? = nil
     ) async throws {
         // System clone windows are transient WindowServer duplicates that
         // must never be moved. Refuse here as a final safety net so no
@@ -3385,7 +3387,12 @@ extension MenuBarItemManager {
         }
 
         if !skipInputPause {
-            try await waitForUserToPauseInput()
+            try await waitForUserToPauseInput(for: requiredInputPause)
+        }
+
+        if shouldProceed?() == false {
+            MenuBarItemManager.diagLog.debug("move: cancelled before synthetic drag because caller state changed")
+            throw EventError.cannotComplete
         }
         appState.hidEventManager.stopAll()
         defer {
@@ -3393,6 +3400,10 @@ extension MenuBarItemManager {
         }
 
         try await waitForMoveOperationBuffer()
+        if shouldProceed?() == false {
+            MenuBarItemManager.diagLog.debug("move: cancelled after move buffer because caller state changed")
+            throw EventError.cannotComplete
+        }
 
         MenuBarItemManager.diagLog.info(
             """
@@ -6831,7 +6842,14 @@ extension MenuBarItemManager {
     /// - Returns: `true` when a move was performed; `false` for any no-op
     ///   (item missing, immovable, non-hideable, or already in `section`).
     @discardableResult
-    func moveItem(withTagIdentifier tagIdentifier: String, toSection section: MenuBarSection.Name) async -> Bool {
+    func moveItem(
+        withTagIdentifier tagIdentifier: String,
+        toSection section: MenuBarSection.Name,
+        requiredInputPause: Duration = .milliseconds(50),
+        watchdogTimeout: DispatchTimeInterval? = nil,
+        maxMoveAttempts: Int = 8,
+        shouldProceed: (@MainActor () -> Bool)? = nil
+    ) async -> Bool {
         guard let appState else { return false }
 
         var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
@@ -6887,7 +6905,15 @@ extension MenuBarItemManager {
         let destination = LayoutReconciler.boundaryDestination(for: resolvedSection, controlItems: controlItems)
 
         do {
-            try await move(item: target, to: destination, on: displayID)
+            try await move(
+                item: target,
+                to: destination,
+                on: displayID,
+                requiredInputPause: requiredInputPause,
+                watchdogTimeout: watchdogTimeout,
+                maxMoveAttempts: maxMoveAttempts,
+                shouldProceed: shouldProceed
+            )
             MenuBarItemManager.diagLog.info("moveItem(trigger): moved \(target.logString) to \(resolvedSection.logString)")
             return true
         } catch {
