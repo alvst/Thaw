@@ -84,6 +84,7 @@ enum MenuBarItemAXProvider {
             // Per-app fallback index so untitled items get distinct titles
             // ("Item-0", "Item-1", …), mirroring the CGS window titles.
             var fallbackIndex = 0
+            var diagnosticChildDescriptions: [String] = []
 
             for child in children {
                 guard let frame = AXHelpers.frame(for: child) else {
@@ -124,7 +125,24 @@ enum MenuBarItemAXProvider {
                     diagLog.debug("menuBarItems: Thaw item — title='\(title)' frame=\(frame) ownerPID=\(ownerPID)")
                 }
 
+                if Defaults.bool(forKey: .diagnosticAssessmentModeSceneProbes),
+                   runningApp.bundleIdentifier == "com.apple.MenuBarAgent"
+                {
+                    diagnosticChildDescriptions.append(
+                        "\(title) frame=\(NSStringFromRect(frame)) ownerPID=\(ownerPID)"
+                    )
+                }
+
                 raw.append(RawItem(namespace: namespace, title: title, bounds: frame, ownerPID: ownerPID))
+            }
+
+            if Defaults.bool(forKey: .diagnosticAssessmentModeSceneProbes),
+               runningApp.bundleIdentifier == "com.apple.MenuBarAgent"
+            {
+                diagLog.info(
+                    "menuBarItems: MenuBarAgent children: " +
+                    diagnosticChildDescriptions.joined(separator: " | ")
+                )
             }
         }
 
@@ -192,7 +210,7 @@ enum MenuBarItemAXProvider {
         switch bundleID {
         case "com.apple.MenuBarAgent":
             return .menuBarAgent
-        case Constants.bundleIdentifier:
+        case _ where Constants.isThawOwnedBundleIdentifier(bundleID):
             return .thaw
         default:
             return .string(bundleID)
