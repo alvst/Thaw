@@ -818,6 +818,24 @@ final class MenuBarManager: ObservableObject {
         }
     }
 
+    /// Hides every expanded menu bar section and closes the Thaw Bar.
+    func hideAllSections() {
+        if let visibleManagedSection = sections
+            .reversed()
+            .first(where: { $0.name != .visible && !$0.isHidden })
+        {
+            visibleManagedSection.hide()
+            return
+        }
+
+        iceBarPanel.close()
+        showOnHoverAllowed = true
+        for section in sections {
+            section.desiredState = .hideSection
+            section.updateControlItemState(for: nil)
+        }
+    }
+
     /// Shows the menu bar layout settings pane.
     @objc private func showMenuBarLayoutSettings() {
         guard let appState else {

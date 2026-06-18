@@ -108,7 +108,10 @@ struct SettingsView: View {
         case .triggers:
             TriggersSettingsPane(manager: appState.settings.triggers, itemManager: appState.itemManager)
         case .developer:
-            DeveloperSettingsPane(manager: appState.settings.triggers)
+            DeveloperSettingsPane(
+                manager: appState.settings.triggers,
+                menuBarManager: appState.menuBarManager
+            )
         case .about:
             AboutSettingsPane(updatesManager: appState.updatesManager)
         }

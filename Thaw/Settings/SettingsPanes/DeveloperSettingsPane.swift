@@ -17,6 +17,8 @@ import SwiftUI
 struct DeveloperSettingsPane: View {
     @ObservedObject private var flags: TriggerFeatureFlagsManager
 
+    private let menuBarManager: MenuBarManager
+
     // Plain reference (not observed): used to read Location authorization
     // status and to (re)request it for the Wi-Fi SSID diagnostic.
     private let systemMonitor: SystemStateMonitor
@@ -28,8 +30,9 @@ struct DeveloperSettingsPane: View {
 
     private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
-    init(manager: MenuBarItemTriggersManager) {
+    init(manager: MenuBarItemTriggersManager, menuBarManager: MenuBarManager) {
         flags = manager.featureFlags
+        self.menuBarManager = menuBarManager
         systemMonitor = manager.systemMonitor
     }
 
@@ -37,6 +40,7 @@ struct DeveloperSettingsPane: View {
         IceForm {
             introSection
             flagsSection
+            menuBarControlsSection
             liveStateSection
         }
         .onAppear {
@@ -107,6 +111,27 @@ struct DeveloperSettingsPane: View {
         }
         .toggleStyle(.switch)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var menuBarControlsSection: some View {
+        IceSection("Menu Bar Controls", options: [.isBordered]) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("All Off")
+                        .font(.callout)
+                    Text("Hide all expanded sections and close the \(Constants.displayName) Bar.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    menuBarManager.hideAllSections()
+                } label: {
+                    Label("All Off", systemImage: "power")
+                }
+            }
+            .padding(8)
+        }
     }
 
     // MARK: Live state

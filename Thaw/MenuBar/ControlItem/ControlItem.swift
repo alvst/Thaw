@@ -657,6 +657,17 @@ final class ControlItem {
 
         menu.addItem(.separator())
 
+        let allOffItem = NSMenuItem(
+            title: String(localized: "All Off"),
+            action: #selector(hideAllSections),
+            keyEquivalent: ""
+        )
+        allOffItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "All Off")
+        allOffItem.target = self
+        menu.addItem(allOffItem)
+
+        menu.addItem(.separator())
+
         // Add items to toggle the hidden and always-hidden sections.
         for name: MenuBarSection.Name in [.hidden, .alwaysHidden] {
             guard
@@ -798,6 +809,11 @@ final class ControlItem {
             return
         }
         section.toggle()
+    }
+
+    /// Hides all expanded menu bar sections.
+    @objc private func hideAllSections() {
+        appState?.menuBarManager.hideAllSections()
     }
 
     /// Opens the menu bar search panel.
