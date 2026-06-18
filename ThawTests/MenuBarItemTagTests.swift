@@ -798,9 +798,11 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
         }
 
         let thawID = "\(Constants.bundleIdentifier):Thaw.ControlItem.Visible"
+        let hostThawID = "\(Constants.bundleIdentifier).MenuBarHost:Thaw.ControlItem.Visible"
         let genericThawID = "\(Constants.bundleIdentifier):Item-0"
         let assignment: [String: MenuBarSection.Name] = [
             thawID: .alwaysHidden,
+            hostThawID: .hidden,
             genericThawID: .hidden,
             "com.example.hidden:Hidden": .hidden,
         ]
@@ -824,10 +826,15 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
             x: 0,
             windowID: 90
         )
-        let app = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 24, windowID: 91)
+        let hostThaw = item(
+            tag: MenuBarItemTag(namespace: .string("\(Constants.bundleIdentifier).MenuBarHost"), title: "Thaw.ControlItem.Visible", windowID: 91),
+            x: 24,
+            windowID: 91
+        )
+        let app = appItem(bundleID: "com.example.alpha", title: "Alpha", x: 48, windowID: 92)
 
         let identifiers = SimpleItemHider.persistableOrderIdentifiers(
-            from: [thaw, app],
+            from: [thaw, hostThaw, app],
             in: .visible
         )
 
@@ -845,19 +852,60 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
             x: 0,
             windowID: 94
         )
-        let app = appItem(bundleID: "com.example.alpha", title: "Item-0", x: 24, windowID: 95)
+        let hostThaw = item(
+            tag: MenuBarItemTag(namespace: .string("\(Constants.bundleIdentifier).MenuBarHost"), title: "Thaw.ControlItem.Visible", windowID: 95),
+            x: 24,
+            windowID: 95
+        )
+        let app = appItem(bundleID: "com.example.alpha", title: "Item-0", x: 48, windowID: 96)
 
         XCTAssertTrue(SimpleItemHider.isProtectedAssignmentItem(genericThaw))
+        XCTAssertTrue(SimpleItemHider.isProtectedAssignmentItem(hostThaw))
         XCTAssertFalse(SimpleItemHider.isProtectedAssignmentItem(app))
     }
 
     @MainActor
-    func testAssessmentModeProtectedBundlesIncludeMainApp() throws {
+    func testAssessmentModeProtectedBundlesIncludeThawOwnedHosts() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("Assessment Mode hiding is macOS 27-specific")
         }
 
         XCTAssertTrue(AssessmentModeBackend.protectedBundleIDs.contains(Constants.bundleIdentifier))
+        XCTAssertTrue(AssessmentModeBackend.protectedBundleIDs.contains("\(Constants.bundleIdentifier).MenuBarHost"))
+    }
+
+    @MainActor
+    func testAssessmentModeDiagnosticSystemItemsModes() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("Assessment Mode hiding is macOS 27-specific")
+        }
+
+        let defaultMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: nil)
+        let invalidMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "unknown")
+        let expandedMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "expanded")
+        let bundleOnlyMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "bundleOnly")
+
+        XCTAssertEqual(defaultMode, .defaultRange)
+        XCTAssertEqual(invalidMode, .defaultRange)
+        XCTAssertEqual(defaultMode.allowedSystemItems.map(\.intValue), Array(0...8))
+        XCTAssertEqual(expandedMode.allowedSystemItems.map(\.intValue), Array(0...32))
+        XCTAssertTrue(bundleOnlyMode.allowedSystemItems.isEmpty)
+    }
+
+    @MainActor
+    func testAXProviderMapsThawOwnedHostsToThawNamespace() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("Menu bar AX provider is macOS 27-specific")
+        }
+
+        XCTAssertEqual(
+            MenuBarItemAXProvider.namespace(forBundleIdentifier: Constants.bundleIdentifier),
+            .thaw
+        )
+        XCTAssertEqual(
+            MenuBarItemAXProvider.namespace(forBundleIdentifier: "\(Constants.bundleIdentifier).MenuBarHost"),
+            .thaw
+        )
     }
 
     @MainActor
@@ -883,7 +931,9 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
     func testSectionAssignmentSanitizerDropsThawControlItems() {
         let visibleControlID = "\(MenuBarItemTag.Namespace.thaw):\(ControlItem.Identifier.visible.rawValue)"
         let hiddenControlID = "\(MenuBarItemTag.Namespace.thaw):\(ControlItem.Identifier.hidden.rawValue)"
+        let hostVisibleControlID = "\(Constants.bundleIdentifier).MenuBarHost:\(ControlItem.Identifier.visible.rawValue)"
         let genericThawID = "\(MenuBarItemTag.Namespace.thaw):Item-0"
+        let hostGenericThawID = "\(Constants.bundleIdentifier).MenuBarHost:Item-0"
         let rawVisibleControlID = ControlItem.Identifier.visible.rawValue
         let appID = "com.example.alpha:Alpha"
         let visibleAppID = "com.example.beta:Beta"
@@ -892,6 +942,8 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
             appID: .hidden,
             hiddenControlID: .alwaysHidden,
             genericThawID: .hidden,
+            hostGenericThawID: .hidden,
+            hostVisibleControlID: .hidden,
             rawVisibleControlID: .hidden,
             visibleAppID: .visible,
             visibleControlID: .hidden,
