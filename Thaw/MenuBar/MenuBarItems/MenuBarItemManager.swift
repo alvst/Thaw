@@ -5715,7 +5715,11 @@ extension MenuBarItemManager {
         }
 
         // Reset persisted state so macOS treats section dividers like new.
-        ControlItemDefaults[.preferredPosition, ControlItem.Identifier.visible.rawValue] = 0
+        if #available(macOS 27, *) {
+            ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: ControlItem.Identifier.visible.rawValue)
+        } else {
+            ControlItemDefaults[.preferredPosition, ControlItem.Identifier.visible.rawValue] = 0
+        }
         ControlItemDefaults.resetChevronPositions()
 
         // Forget previously seen/pinned items so we treat everything as new.
