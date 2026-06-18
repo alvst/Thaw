@@ -69,6 +69,12 @@ final class SimpleItemHider: ObservableObject {
     /// assertion).
     private let backend: AssessmentModeBackend
 
+    /// Governs the Apple Control Center extras (AirDrop / Focus / User / Now
+    /// Playing) that the assessment-mode allowlist cannot control. Items it owns
+    /// are stripped from the backend input and hidden via their Control Center
+    /// preference instead.
+    private let ccModuleManager: ControlCenterModuleManager
+
     private var timer: Timer?
 
     init(appState: AppState) {
@@ -76,6 +82,7 @@ final class SimpleItemHider: ObservableObject {
         self.sectionAssignment = Self.loadAssignment()
         self.sectionItemOrder = Self.loadOrder()
         self.backend = AssessmentModeBackend()
+        self.ccModuleManager = ControlCenterModuleManager()
         let assessmentModeAvailable = AssessmentModeBackend.isAvailable
         diagLog.info("hiding backend: AssessmentMode (\(assessmentModeAvailable ? "available" : "unavailable")); \(sectionAssignment.count) assigned item(s)")
     }
@@ -453,9 +460,25 @@ final class SimpleItemHider: ObservableObject {
             sectionAssignment,
             revealing: revealedSection
         )
+
+        // Apple Control Center extras (AirDrop / Focus / User / Now Playing)
+        // cannot be hidden by the assessment-mode allowlist (proven 2026-06-18).
+        // Route any that are effectively hidden right now to their Control Center
+        // preference, and strip them from the backend input so they never poison
+        // the bundle allowlist.
+        var backendAssignment = effectiveAssignment
+        var ccHiddenTitles = Set<String>()
+        for identifier in effectiveAssignment.keys {
+            if let title = ControlCenterModuleManager.governableMenuExtraTitle(forItemIdentifier: identifier) {
+                ccHiddenTitles.insert(title)
+                backendAssignment.removeValue(forKey: identifier)
+            }
+        }
+        ccModuleManager.apply(hiddenMenuExtraTitles: ccHiddenTitles)
+
         logRestrictionProbeSnapshot(reason: "before-apply", items: allItems)
         let didChangeRestriction = backend.apply(
-            sectionAssignment: effectiveAssignment,
+            sectionAssignment: backendAssignment,
             allItems: allItems
         )
         if didChangeRestriction {
