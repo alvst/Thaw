@@ -13,7 +13,7 @@ import Combine
 
 /// A status item that controls a section in the menu bar.
 @MainActor
-final class ControlItem {
+final class ControlItem: NSObject {
     /// An identifier for a control item.
     enum Identifier: String, CaseIterable {
         /// The identifier for the control item for the visible section.
@@ -59,6 +59,32 @@ final class ControlItem {
         case hideSection
     }
 
+    /// The visual treatment for a hidden/always-hidden section divider.
+    enum SectionDividerPresentation: Equatable {
+        /// Collapse the status item because the user selected no divider.
+        case hidden
+        /// Show the small, interactive chevron between sections.
+        case chevron
+        /// Keep the legacy expanded divider invisible while it reflows items.
+        case legacyConcealedSection
+    }
+
+    /// Resolves divider appearance independently of AppKit so the macOS 26 and
+    /// macOS 27 policies cannot accidentally bleed into each other.
+    static nonisolated func sectionDividerPresentation(
+        state: HidingState,
+        style: SectionDividerStyle,
+        supportsSectionHiding: Bool
+    ) -> SectionDividerPresentation {
+        if case .hideSection = state {
+            return supportsSectionHiding ? .legacyConcealedSection : .hidden
+        }
+        return switch style {
+        case .noDivider: .hidden
+        case .chevron: .chevron
+        }
+    }
+
     /// A namespace for control item lengths.
     private enum Lengths {
         static let standard: CGFloat = NSStatusItem.variableLength
@@ -95,9 +121,20 @@ final class ControlItem {
                     self.constraint = nil
                 }
 
-                button.target = controlItem
-                button.action = #selector(controlItem.performAction)
-                button.sendAction(on: [.leftMouseDown, .rightMouseUp])
+                if #available(macOS 27, *), controlItem.identifier == .visible {
+                    // MenuBarAgent forwards semantic primary activation, but
+                    // not the status button's secondary-click gesture. The HID
+                    // event path handles that gesture using the live icon frame.
+                    button.addTarget(
+                        controlItem,
+                        action: #selector(controlItem.performPrimaryAction),
+                        for: .primaryActionTriggered
+                    )
+                } else {
+                    button.target = controlItem
+                    button.action = #selector(controlItem.performAction)
+                    button.sendAction(on: [.leftMouseDown, .rightMouseUp])
+                }
 
                 // On macOS 27 the WindowServer no longer exposes individual
                 // menu bar item windows, so Thaw enumerates items through the
@@ -203,6 +240,7 @@ final class ControlItem {
     /// Creates a control item with the given identifier.
     init(identifier: Identifier) {
         self.identifier = identifier
+        super.init()
     }
 
     /// Performs the initial setup of the control item.
@@ -402,29 +440,29 @@ final class ControlItem {
 
             button.image = image
         case .hidden, .alwaysHidden:
-            switch state {
-            case .showSection:
+            switch Self.sectionDividerPresentation(
+                state: state,
+                style: appState.settings.advanced.sectionDividerStyle,
+                supportsSectionHiding: Constants.supportsSectionHiding
+            ) {
+            case .hidden:
                 button.isEnabled = true
                 button.alphaValue = 1
-                switch appState.settings.advanced.sectionDividerStyle {
-                case .noDivider:
-                    updateStatusItemVisibility(false)
-                    button.appearsDisabled = true
-                    button.isHighlighted = false
+                updateStatusItemVisibility(false)
+                button.appearsDisabled = true
+                button.isHighlighted = false
 
-                    if appState.isDraggingMenuBarItem, appState.settings.advanced.showAllSectionsOnUserDrag {
-                        // We still want a subtle marker between sections.
-                        button.title = "|"
-                    }
-                case .chevron:
-                    updateStatusItemVisibility(true)
-                    button.appearsDisabled = false
-
-                    if identifier != .visible {
-                        button.image = ControlItemImage.builtin(.chevronSmall).nsImage(for: appState)
-                    }
+                if appState.isDraggingMenuBarItem, appState.settings.advanced.showAllSectionsOnUserDrag {
+                    // We still want a subtle marker between sections.
+                    button.title = "|"
                 }
-            case .hideSection:
+            case .chevron:
+                updateStatusItemVisibility(true)
+                button.isEnabled = true
+                button.alphaValue = 1
+                button.appearsDisabled = false
+                button.image = ControlItemImage.builtin(.chevronSmall).nsImage(for: appState)
+            case .legacyConcealedSection:
                 updateStatusItemVisibility(true)
                 button.appearsDisabled = true
                 button.isHighlighted = false
@@ -732,6 +770,80 @@ final class ControlItem {
         }
     }
 
+    /// The semantic action produced by primary status-button activation.
+    enum PrimaryActionIntent: Equatable {
+        case toggleSection
+        case showAlwaysHidden
+        case toggleAlwaysHidden
+        case contextMenu
+        case none
+    }
+
+    /// Resolves primary activation independently of AppKit event delivery.
+    static nonisolated func primaryActionIntent(
+        identifier: Identifier,
+        modifierFlags: NSEvent.ModifierFlags,
+        clickCount: Int,
+        usesDoubleClick: Bool,
+        usesOptionClick: Bool
+    ) -> PrimaryActionIntent {
+        if usesDoubleClick, clickCount > 1, identifier == .visible {
+            return .showAlwaysHidden
+        }
+        if modifierFlags.contains(.control) {
+            return .contextMenu
+        }
+        if modifierFlags.contains(.option) {
+            return usesOptionClick ? .toggleAlwaysHidden : .none
+        }
+        return .toggleSection
+    }
+
+    /// Handles macOS 27's semantic primary action for the visible control item.
+    /// Control-click and right-click context menus are routed through
+    /// `HIDEventManager` because MenuBarAgent does not forward secondary
+    /// gestures from the remotely hosted status button.
+    @available(macOS 27, *)
+    @objc private func performPrimaryAction() {
+        guard let appState else {
+            return
+        }
+
+        let screenForCheck = window?.screen ?? NSScreen.main
+        if let screen = screenForCheck, !screen.isSystemMenuBarVisible() {
+            return
+        }
+
+        let event = NSApp.currentEvent
+        let intent = Self.primaryActionIntent(
+            identifier: identifier,
+            modifierFlags: event?.modifierFlags ?? [],
+            clickCount: event?.clickCount ?? 0,
+            usesDoubleClick: appState.settings.advanced.useDoubleClickToShowAlwaysHiddenSection,
+            usesOptionClick: appState.settings.advanced.useOptionClickToShowAlwaysHiddenSection
+        )
+        let menuBarManager = appState.menuBarManager
+
+        Task {
+            switch intent {
+            case .toggleSection:
+                if let section = menuBarManager.section(withName: sectionName), section.isEnabled {
+                    section.toggle()
+                }
+            case .showAlwaysHidden:
+                if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
+                    section.show()
+                }
+            case .toggleAlwaysHidden:
+                if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
+                    section.toggle()
+                }
+            case .contextMenu, .none:
+                break
+            }
+        }
+    }
+
     /// Creates a menu to show under the control item.
     private func createMenu(with appState: AppState) -> NSMenu {
         func hotkey(withAction action: HotkeyAction) -> Hotkey? {
@@ -924,6 +1036,17 @@ final class ControlItem {
         statusItem.showMenu(menu)
     }
 
+    /// Shows the Thaw-icon context menu at a global screen location.
+    /// Used on macOS 27 because MenuBarAgent does not forward secondary-click
+    /// gestures through the remotely hosted status-bar button.
+    func showContextMenu(at point: CGPoint) {
+        guard let appState else {
+            return
+        }
+        let menu = createMenu(with: appState)
+        menu.popUp(positioning: nil, at: point, in: nil)
+    }
+
     /// Toggles the menu bar section associated with the given menu item.
     @objc private func toggleMenuBarSection(for menuItem: NSMenuItem) {
         guard let section = menuItem.representedObject as? MenuBarSection else {
@@ -1055,21 +1178,27 @@ enum ControlItemDefaults {
         restoreVisibilityIfNeeded(autosaveName: autosaveName)
     }
 
-    /// The visible Thaw control item must always be registered with
-    /// MenuBarAgent. User preference hides it by setting length to zero, not by
-    /// persisting `VisibleCC = 0`. macOS 27 removal can leave that persisted bit
-    /// false, making the app unreachable on the next launch.
+    /// Thaw's visible icon and hidden-section divider must remain registered with
+    /// MenuBarAgent on macOS 27. Their presentation is controlled by length and
+    /// alpha; persisting `VisibleCC = 0` prevents AppKit from publishing the item
+    /// at all, so later appearance updates cannot bring it back.
     static func restoreVisibilityIfNeeded(autosaveName: String) {
-        guard autosaveName == ControlItem.Identifier.visible.rawValue else {
-            return
-        }
         guard #available(macOS 27, *) else {
             return
         }
-        ControlItemDefaults[.visible, autosaveName] = true
-        ControlItemDefaults[.visibleCC, autosaveName] = true
-        if let position = ControlItemDefaults[.preferredPosition, autosaveName], position <= 0 {
-            ControlItemDefaults[.preferredPosition, autosaveName] = nil
+
+        switch autosaveName {
+        case ControlItem.Identifier.visible.rawValue:
+            ControlItemDefaults[.visible, autosaveName] = true
+            ControlItemDefaults[.visibleCC, autosaveName] = true
+            if let position = ControlItemDefaults[.preferredPosition, autosaveName], position <= 0 {
+                ControlItemDefaults[.preferredPosition, autosaveName] = nil
+            }
+        case ControlItem.Identifier.hidden.rawValue:
+            ControlItemDefaults[.visible, autosaveName] = true
+            ControlItemDefaults[.visibleCC, autosaveName] = true
+        default:
+            break
         }
     }
 
