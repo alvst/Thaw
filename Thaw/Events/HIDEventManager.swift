@@ -191,17 +191,31 @@ final class HIDEventManager: ObservableObject {
         pendingSecondaryContextMenuTask?.cancel()
         switch event.type {
         case .leftMouseDown:
+            let clickLocation = NSEvent.mouseLocation
+            if
+                event.modifierFlags.contains(.control),
+                handleControlItemContextMenu(
+                    appState: appState,
+                    clickLocation: clickLocation
+                )
+            {
+                break
+            }
             // Check app menu first - if click is on app menu area, don't trigger
             // show-on-click or smart rehide (the click belongs to the app menu)
             let isAppMenuClick = handleApplicationMenuClickThrough(appState: appState, screen: screen)
             if !isAppMenuClick {
-                // Capture the click location synchronously from the event.
-                let clickLocation = NSEvent.mouseLocation
                 handleShowOnClick(appState: appState, screen: screen, clickLocation: clickLocation, modifierFlags: event.modifierFlags, isDoubleClick: event.clickCount > 1)
                 handleSmartRehide(with: event, appState: appState, screen: screen)
             }
         case .rightMouseDown:
-            handleSecondaryContextMenu(appState: appState, screen: screen)
+            let clickLocation = NSEvent.mouseLocation
+            if !handleControlItemContextMenu(
+                appState: appState,
+                clickLocation: clickLocation
+            ) {
+                handleSecondaryContextMenu(appState: appState, screen: screen)
+            }
         default:
             return event
         }
@@ -1055,6 +1069,42 @@ extension HIDEventManager {
     }
 
     // MARK: Handle Secondary Context Menu
+
+    /// Returns whether macOS 27 should route a secondary click to the Thaw
+    /// control item's menu instead of the empty-menu-bar context menu.
+    static nonisolated func shouldShowControlItemContextMenu(
+        usesMenuBarAgent: Bool,
+        controlItemFrame: CGRect?,
+        clickLocation: CGPoint
+    ) -> Bool {
+        usesMenuBarAgent && controlItemFrame?.contains(clickLocation) == true
+    }
+
+    /// Shows the menu belonging to the Thaw icon when the click lands inside
+    /// its live frame. Returns whether the click was consumed by this route.
+    private func handleControlItemContextMenu(
+        appState: AppState,
+        clickLocation: CGPoint
+    ) -> Bool {
+        guard
+            #available(macOS 27, *),
+            let controlItem = appState.menuBarManager.section(withName: .visible)?.controlItem,
+            Self.shouldShowControlItemContextMenu(
+                usesMenuBarAgent: true,
+                controlItemFrame: controlItem.window?.frame
+                    ?? controlItem.frame
+                    ?? controlItem.onScreenFrame,
+                clickLocation: clickLocation
+            )
+        else {
+            return false
+        }
+
+        Task {
+            controlItem.showContextMenu(at: clickLocation)
+        }
+        return true
+    }
 
     private func handleSecondaryContextMenu(
         appState: AppState,
