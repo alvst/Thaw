@@ -6171,6 +6171,202 @@ extension MenuBarItemManager {
         try await resetLayoutToFreshState()
     }
 
+    /// macOS 27 reset-to-visible: clears every section assignment so all
+    /// hideable items return to the visible section via ``SimpleItemHider``.
+    ///
+    /// - Returns: Always 0 — there are no physical moves that can "fail" on 27.
+    private func resetLayoutToVisibleMacOS27() async -> Int {
+        isResettingLayout = true
+        defer { isResettingLayout = false }
+
+        guard let appState, let hider = appState.menuBarManager.simpleItemHider else {
+            MenuBarItemManager.diagLog.warning("macOS 27 reset-to-visible: no SimpleItemHider; nothing to do")
+            return 0
+        }
+
+        pinnedHiddenBundleIDs.removeAll()
+        pinnedAlwaysHiddenBundleIDs.removeAll()
+        persistPinnedBundleIDs()
+        savedSectionOrder.removeAll()
+        persistSavedSectionOrder()
+
+        hider.resetAssignment(to: [:])
+        MenuBarItemManager.diagLog.info("macOS 27 reset-to-visible: cleared all section assignments")
+
+        await cacheItemsRegardless(skipRecentMoveCheck: true)
+
+        await MainActor.run {
+            appState.imageCache.clearAll()
+            appState.imageCache.performCacheCleanup()
+        }
+        await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+        await MainActor.run {
+            appState.objectWillChange.send()
+        }
+
+        return 0
+    }
+
+    /// Moves every movable, hideable item to the visible section.
+    ///
+    /// - Returns: The number of items that failed to move.
+    func resetLayoutToVisible() async throws -> Int {
+        MenuBarItemManager.diagLog.info("Resetting menu bar layout to visible")
+
+        if !Constants.supportsSectionHiding {
+            return await resetLayoutToVisibleMacOS27()
+        }
+
+        startupSettlingTask?.cancel()
+        isInStartupSettling = false
+        settlingDeadline = nil
+        settlingExpectedBundleIDs.removeAll()
+        settlingKind = nil
+        isResettingLayout = true
+        defer { isResettingLayout = false }
+
+        guard let appState else {
+            throw LayoutResetError.missingAppState
+        }
+
+        pinnedHiddenBundleIDs.removeAll()
+        pinnedAlwaysHiddenBundleIDs.removeAll()
+        persistPinnedBundleIDs()
+        savedSectionOrder.removeAll()
+        persistSavedSectionOrder()
+        temporarilyShownItemContexts.removeAll()
+
+        var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+
+        let hiddenWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .hidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        let alwaysHiddenWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .alwaysHidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+
+        guard let controlItems = ControlItemPair(
+            items: &items,
+            hiddenControlItemWindowID: hiddenWID,
+            alwaysHiddenControlItemWindowID: alwaysHiddenWID
+        ) else {
+            throw LayoutResetError.missingControlItems
+        }
+
+        return try await resetLayoutToVisibleWithControlItems(controlItems: controlItems, items: items)
+    }
+
+    private func resetLayoutToVisibleWithControlItems(
+        controlItems: ControlItemPair,
+        items: [MenuBarItem]
+    ) async throws -> Int {
+        guard let appState else {
+            throw LayoutResetError.missingAppState
+        }
+
+        appState.menuBarManager.iceBarPanel.close()
+
+        appState.hidEventManager.stopAll()
+        defer {
+            appState.hidEventManager.startAll()
+        }
+
+        let hiddenControlBounds = Bridging.getWindowBounds(for: controlItems.hidden.windowID)
+            ?? controlItems.hidden.bounds
+
+        func itemsNotInVisible(_ items: [MenuBarItem]) -> [MenuBarItem] {
+            items.filter { item in
+                guard item.isMovable, item.canBeHidden, !item.isControlItem,
+                      item.tag != .visibleControlItem
+                else {
+                    return false
+                }
+                let bounds = Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
+                return bounds.minX < hiddenControlBounds.maxX
+            }
+        }
+
+        func movePass(_ items: [MenuBarItem]) async -> Int {
+            var failed = 0
+            for item in items {
+                do {
+                    try await move(
+                        item: item,
+                        to: .rightOfItem(controlItems.hidden),
+                        skipInputPause: true,
+                        watchdogTimeout: Self.layoutWatchdogTimeout
+                    )
+                } catch {
+                    failed += 1
+                    MenuBarItemManager.diagLog.error("Failed to move \(item.logString) during reset-to-visible: \(error)")
+                }
+            }
+            return failed
+        }
+
+        var failedMoves = await movePass(itemsNotInVisible(items))
+
+        try? await Task.sleep(for: .milliseconds(200))
+
+        var refreshedItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+        let refreshHiddenWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .hidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        let refreshAlwaysHiddenWID: CGWindowID? = appState.menuBarManager
+            .controlItem(withName: .alwaysHidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        if let refreshedControls = ControlItemPair(
+            items: &refreshedItems,
+            hiddenControlItemWindowID: refreshHiddenWID,
+            alwaysHiddenControlItemWindowID: refreshAlwaysHiddenWID
+        ) {
+            let refreshedHiddenBounds = Bridging.getWindowBounds(for: refreshedControls.hidden.windowID)
+                ?? refreshedControls.hidden.bounds
+            let notYetInVisible = refreshedItems.filter { item in
+                guard item.isMovable, item.canBeHidden, !item.isControlItem,
+                      item.tag != .visibleControlItem
+                else {
+                    return false
+                }
+                let bounds = Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
+                return bounds.minX < refreshedHiddenBounds.maxX
+            }
+            if !notYetInVisible.isEmpty {
+                MenuBarItemManager.diagLog.debug("Reset-to-visible pass 2: \(notYetInVisible.count) items not yet in visible section")
+                failedMoves += await movePass(notYetInVisible)
+            }
+        }
+
+        cacheActor.clearCachedItemWindowIDs()
+        itemCache = ItemCache(displayID: nil)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.backgroundCacheContinuation = continuation
+            Task { [weak self] in
+                await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
+            }
+        }
+
+        await MainActor.run {
+            appState.imageCache.clearAll()
+            appState.imageCache.performCacheCleanup()
+        }
+
+        if itemCache.displayID != nil {
+            await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+        } else {
+            try? await Task.sleep(for: .milliseconds(350))
+            await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+        }
+
+        await MainActor.run {
+            appState.objectWillChange.send()
+        }
+
+        NSScreen.invalidateMenuBarHeightCache()
+
+        return failedMoves
+    }
+
     /// Ends an in-flight settling period immediately. Used by paths that
     /// pre-flight a settling period before a potentially-no-op spacing
     /// apply: when applyOffset turns out not to relaunch anything, the
