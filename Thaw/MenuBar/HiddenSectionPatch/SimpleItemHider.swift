@@ -76,6 +76,7 @@ final class SimpleItemHider: ObservableObject {
     private let ccModuleManager: ControlCenterModuleManager
 
     private var timer: Timer?
+    private var boundaryReconciliationTask: Task<Void, Never>?
 
     init(appState: AppState) {
         self.appState = appState
@@ -210,13 +211,41 @@ final class SimpleItemHider: ObservableObject {
     }
 
     /// Temporarily reveals a hidden section in the real menu bar.
-    func show(_ section: MenuBarSection.Name) {
+    func show(
+        _ section: MenuBarSection.Name,
+        reconcileBoundary: Bool = true
+    ) {
+        if !reconcileBoundary {
+            boundaryReconciliationTask?.cancel()
+            boundaryReconciliationTask = nil
+        }
         guard let target = Self.revealTarget(for: section), revealedSection != target else {
             return
         }
         revealedSection = target
         diagLog.info("show(\(target.rawValue)); temporarily revealing assigned item(s)")
         refresh()
+
+        guard reconcileBoundary else { return }
+
+        // Existing assignments created by earlier macOS 27 builds may never
+        // have crossed a physical divider. Once their AX elements reappear,
+        // repair that persisted layout so the revealed bar is always:
+        // Hidden < divider < Visible.
+        boundaryReconciliationTask?.cancel()
+        boundaryReconciliationTask = Task { @MainActor [weak self, weak appState] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard let self,
+                  let appState,
+                  !Task.isCancelled,
+                  self.revealedSection == target
+            else {
+                return
+            }
+            await appState.itemManager.reconcileMacOS27SectionBoundaries(
+                revealing: target
+            )
+        }
     }
 
     /// Re-applies the persisted assignment, concealing temporary reveals.
@@ -224,6 +253,8 @@ final class SimpleItemHider: ObservableObject {
         guard revealedSection != nil else {
             return
         }
+        boundaryReconciliationTask?.cancel()
+        boundaryReconciliationTask = nil
         let previous = revealedSection
         revealedSection = nil
         diagLog.info("hideRevealedSections(previous=\(previous?.rawValue ?? "none"))")
