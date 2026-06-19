@@ -1389,6 +1389,33 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
 
     // MARK: Update Cache
 
+    /// Resolves which requested sections currently have live menu-bar pixels
+    /// available for capture. macOS 27 physically removes concealed items from
+    /// MenuBarAgent, but temporarily revealed sections can and should be
+    /// captured so their real glyphs remain cached after concealment resumes.
+    static nonisolated func capturableSections(
+        from requestedSections: [MenuBarSection.Name],
+        usesVisibilityRestrictions: Bool,
+        revealedSection: MenuBarSection.Name?
+    ) -> [MenuBarSection.Name] {
+        guard usesVisibilityRestrictions else {
+            return requestedSections
+        }
+
+        return requestedSections.filter { section in
+            switch (section, revealedSection) {
+            case (.visible, _):
+                true
+            case (.hidden, .hidden), (.hidden, .alwaysHidden):
+                true
+            case (.alwaysHidden, .alwaysHidden):
+                true
+            default:
+                false
+            }
+        }
+    }
+
     /// Updates the cache for the given sections, without checking whether
     /// caching is necessary.
     @MainActor
@@ -1418,19 +1445,14 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
 
         let scale = screen.backingScaleFactor
 
-        // macOS 27: only the visible section is actually on screen. Hidden and
-        // always-hidden items are concealed by the visibility-restriction
-        // assertion, so capturing them would crop the live MenuBarAgent hosting
-        // window at their *stale* pre-conceal bounds and grab whatever item now
-        // occupies that region — producing wrong/garbled icons in the layout UI.
-        // Skip them: their last-good image (captured while visible) is preserved
-        // by the valid-tag cleanup below.
-        let sectionsToCapture: [MenuBarSection.Name]
-        if #available(macOS 27, *) {
-            sectionsToCapture = sections.filter { $0 == .visible }
-        } else {
-            sectionsToCapture = sections
-        }
+        // Concealed macOS 27 sections have only stale snapshot bounds, so crop
+        // them only while SimpleItemHider has actually revealed their live AX
+        // elements. Their last-good captures remain cached after they hide.
+        let sectionsToCapture = Self.capturableSections(
+            from: sections,
+            usesVisibilityRestrictions: !Constants.supportsSectionHiding,
+            revealedSection: appState.menuBarManager.simpleItemHider?.revealedSection
+        )
 
         MenuBarItemImageCache.diagLog.notice("updateCacheWithoutChecks: displayID=\(screen.displayID) backingScaleFactor=\(Double(scale)) hasNotch=\(screen.hasNotch) menuBarHeight=\(Double(screen.getMenuBarHeightEstimate())) sections=\(sectionsToCapture.map(\.logString))")
         var newImages = [MenuBarItemTag: CapturedImage]()
