@@ -38,61 +38,17 @@ final class AssessmentModeBackend {
         ThawAssessmentModeHidingAvailable()
     }
 
-    /// Diagnostic modes for the private Assessment Mode system-item allowlist.
+    /// The Apple system-item identifiers kept visible by the Assessment Mode
+    /// restriction.
     ///
-    /// The default preserves Thaw's current macOS 27 behavior. The expanded and
-    /// bundle-only modes are hidden expert probes for isolating whether Apple's
-    /// system-item allowlist is involved in status-item scene loss.
-    enum DiagnosticSystemItemsMode: String {
-        case defaultRange = "default"
-        case expandedRange = "expanded"
-        case bundleOnly = "bundleOnly"
-
-        var allowedSystemItems: [NSNumber] {
-            switch self {
-            case .defaultRange:
-                // MBSystemItemIdentifier has exactly 9 cases, raw values 0...8:
-                // battery, Bluetooth, clock, displays, keyboard, volume, Wi-Fi,
-                // screen mirroring, and the primary BentoBox. Menu extras such
-                // as AirDrop are not in this enum; Assessment Mode matches them
-                // by logical com.apple.menuextra.* IDs instead.
-                (0...8).map { NSNumber(value: $0) }
-            case .expandedRange:
-                (0...32).map { NSNumber(value: $0) }
-            case .bundleOnly:
-                []
-            }
-        }
-
-        var logDescription: String {
-            switch self {
-            case .defaultRange:
-                "default(0...8)"
-            case .expandedRange:
-                "expanded(0...32)"
-            case .bundleOnly:
-                "bundleOnly(empty)"
-            }
-        }
-    }
-
-    static func diagnosticSystemItemsMode(rawValue: String?) -> DiagnosticSystemItemsMode {
-        // macOS 27: .defaultRange (0...8) is the proven optimum. The 2026-06-18
-        // probe exhausted every systemItems setting: 0...8 keeps the 5 core CC
-        // modules but always collateral-hides the 4 non-core extras
-        // (user/now-playing/focusmode/airdrop); 0...32 is identical (raw values >8
-        // map to nothing); [] (.bundleOnly) hides ALL 9. The 4 extras have no slot
-        // in either allowlist axis, so the mechanism cannot preserve them — accept
-        // collateral. See [[macos27-system-item-hiding-approach]].
-        guard let rawValue, !rawValue.isEmpty else {
-            return .defaultRange
-        }
-        return DiagnosticSystemItemsMode(rawValue: rawValue) ?? .defaultRange
-    }
-
-    private static var diagnosticSystemItemsMode: DiagnosticSystemItemsMode {
-        diagnosticSystemItemsMode(rawValue: Defaults.string(forKey: .diagnosticAssessmentModeSystemItems))
-    }
+    /// `MBSystemItemIdentifier` has exactly 9 cases, raw values 0...8 (battery,
+    /// Bluetooth, clock, displays, keyboard, volume, Wi-Fi, screen mirroring, and
+    /// the primary BentoBox). The 2026-06-18 probe proved this is the only useful
+    /// value: widening past 8 maps to nothing (identical result), and an empty
+    /// list hides ALL system items. Menu extras (AirDrop/Focus/User/NowPlaying)
+    /// are not in this enum and cannot be preserved by the allowlist — that
+    /// collateral is accepted. See [[macos27-system-item-hiding-approach]].
+    static let allowedSystemItems: [NSNumber] = (0...8).map { NSNumber(value: $0) }
 
     private let diagLog = DiagLog(category: "AssessmentModeBackend")
 
@@ -104,9 +60,6 @@ final class AssessmentModeBackend {
 
     /// The allowed-app bundle IDs baked into the currently-active assertion.
     private var appliedAllowed: Set<String> = []
-
-    /// The system-item allowlist mode baked into the currently-active assertion.
-    private var appliedSystemItemsMode: DiagnosticSystemItemsMode?
 
     /// Learned `uniqueIdentifier → owning bundle ID` map. A concealed item drops
     /// out of AX enumeration entirely (the assertion removes it), so it would no
@@ -261,11 +214,9 @@ final class AssessmentModeBackend {
         //     hidden by the allowlist).
         // Apps merely quitting leave harmless stale entries in the allowlist, so
         // a pure shrink of the allowed set is ignored — no reflow needed.
-        let systemItemsMode = Self.diagnosticSystemItemsMode
         let concealedChanged = concealedBundleIDs != appliedConcealed
-        let systemItemsModeChanged = systemItemsMode != appliedSystemItemsMode
         let newlyAppeared = !allowedSet.subtracting(appliedAllowed).isEmpty
-        guard handle == nil || concealedChanged || systemItemsModeChanged || newlyAppeared else { return false }
+        guard handle == nil || concealedChanged || newlyAppeared else { return false }
 
         // Don't re-activate the exact configuration that just failed
         // asynchronously — that would hot-loop on the 1s timer. Any change to the
@@ -279,13 +230,12 @@ final class AssessmentModeBackend {
         // Re-activate with the new allowlist. The previous assertion is dropped
         // first so the server applies a single, current restriction.
         let allowedBundleIDs = allowedSet.sorted()
-        let allowedSystemItems = systemItemsMode.allowedSystemItems
+        let allowedSystemItems = Self.allowedSystemItems
         activationGeneration += 1
         let generation = activationGeneration
         let attemptedAllowed = allowedSet
         diagLog.info(
-            "applying restriction: systemItemsMode=\(systemItemsMode.logDescription), " +
-            "systemItems=\(allowedSystemItems.map(\.stringValue)), " +
+            "applying restriction: systemItems=\(allowedSystemItems.map(\.stringValue)), " +
             "concealedBundles=\(concealedBundleIDs.sorted()), allowedBundles=\(allowedBundleIDs.count)"
         )
         let newHandle = ThawAssessmentModeHidingActivate(allowedBundleIDs, allowedSystemItems) { [weak self] in
@@ -303,7 +253,6 @@ final class AssessmentModeBackend {
                 self.handle = nil
                 self.appliedConcealed = []
                 self.appliedAllowed = []
-                self.appliedSystemItemsMode = nil
                 self.lastFailedAllowed = attemptedAllowed
             }
         }
@@ -313,10 +262,9 @@ final class AssessmentModeBackend {
         handle = newHandle
         appliedConcealed = concealedBundleIDs
         appliedAllowed = allowedSet
-        appliedSystemItemsMode = systemItemsMode
         diagLog.info(
             "applied restriction: concealing \(concealedBundleIDs.count) app(s), " +
-            "allowing \(allowedBundleIDs.count), systemItemsMode=\(systemItemsMode.logDescription)"
+            "allowing \(allowedBundleIDs.count)"
         )
         return true
     }
@@ -327,7 +275,6 @@ final class AssessmentModeBackend {
         handle = nil
         appliedConcealed = []
         appliedAllowed = []
-        appliedSystemItemsMode = nil
         diagLog.info("restriction reset; all items revealed")
         return true
     }

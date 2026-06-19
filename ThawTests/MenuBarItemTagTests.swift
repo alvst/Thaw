@@ -885,21 +885,14 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
     }
 
     @MainActor
-    func testAssessmentModeDiagnosticSystemItemsModes() throws {
+    func testAssessmentModeAllowedSystemItemsAreCoreRange() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("Assessment Mode hiding is macOS 27-specific")
         }
 
-        let defaultMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: nil)
-        let invalidMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "unknown")
-        let expandedMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "expanded")
-        let bundleOnlyMode = AssessmentModeBackend.diagnosticSystemItemsMode(rawValue: "bundleOnly")
-
-        XCTAssertEqual(defaultMode, .defaultRange)
-        XCTAssertEqual(invalidMode, .defaultRange)
-        XCTAssertEqual(defaultMode.allowedSystemItems.map(\.intValue), Array(0...8))
-        XCTAssertEqual(expandedMode.allowedSystemItems.map(\.intValue), Array(0...32))
-        XCTAssertTrue(bundleOnlyMode.allowedSystemItems.isEmpty)
+        // MBSystemItemIdentifier has exactly 9 cases (raw values 0...8); the
+        // restriction must allow exactly those to keep the core system controls.
+        XCTAssertEqual(AssessmentModeBackend.allowedSystemItems.map(\.intValue), Array(0...8))
     }
 
     @MainActor
