@@ -2224,7 +2224,7 @@ extension MenuBarItemManager {
             return
         }
 
-        await enforceControlItemOrder(controlItems: controlItems)
+        await enforceControlItemOrder(controlItems: controlItems, items: items)
 
         guard !Task.isCancelled else {
             MenuBarItemManager.diagLog.debug("cacheItemsRegardless: cancelled before relocateNewLeftmostItems")
@@ -3517,7 +3517,8 @@ extension MenuBarItemManager {
         on displayID: CGDirectDisplayID? = nil,
         skipInputPause: Bool = false,
         watchdogTimeout: DispatchTimeInterval? = nil,
-        maxMoveAttempts: Int = 8
+        maxMoveAttempts: Int = 8,
+        allowSectionBoundaryTargetOnMacOS27: Bool = false
     ) async throws {
         // System clone windows are transient WindowServer duplicates that
         // must never be moved. Refuse here as a final safety net so no
@@ -3536,13 +3537,16 @@ extension MenuBarItemManager {
             throw EventError.cannotComplete
         }
 
-        // macOS 27: moving onto a Hidden / Always-Hidden divider is a legacy
-        // off-screen reflow operation and cannot succeed. Section assignment is
-        // handled by SimpleItemHider instead, so short-circuit before any
-        // cursor/input work.
+        // Most legacy callers target a section divider to trigger the old
+        // over-wide reflow, which no longer works on macOS 27. The explicit
+        // section-transition path opts in because it uses the divider as a
+        // normal, visible Command-drag anchor before updating the assertion.
         if !Constants.supportsSectionHiding {
             let target = destination.targetItem
-            if target.isControlItem, target.tag != .visibleControlItem {
+            if target.isControlItem,
+               target.tag != .visibleControlItem,
+               !allowSectionBoundaryTargetOnMacOS27
+            {
                 MenuBarItemManager.diagLog.warning(
                     "Skipping legacy divider hide-move of \(item.logString) to \(destination.logString) on macOS 27"
                 )
@@ -3722,6 +3726,216 @@ extension MenuBarItemManager {
         }
     }
 
+    /// Returns whether a live item is on the correct side of Thaw's section
+    /// dividers. On macOS 27 the assertion controls visibility, but physical
+    /// order still defines the user-facing boundary when a section is revealed:
+    /// Always Hidden < its divider < Hidden < its divider < Visible.
+    static nonisolated func macOS27LiveOrderSatisfiesSectionBoundary(
+        items: [MenuBarItem],
+        item: MenuBarItem,
+        section: MenuBarSection.Name,
+        controlItems: ControlItemPair
+    ) -> Bool {
+        let orderedItems = items
+            .filter { !$0.isSystemClone }
+            .sorted { lhs, rhs in
+                if lhs.bounds.midX == rhs.bounds.midX {
+                    return lhs.uniqueIdentifier < rhs.uniqueIdentifier
+                }
+                return lhs.bounds.midX < rhs.bounds.midX
+            }
+        guard let itemIndex = orderedItems.firstIndex(where: {
+            $0.tag.matchesIgnoringWindowID(item.tag)
+        }),
+            let hiddenDividerIndex = orderedItems.firstIndex(where: {
+                $0.tag.matchesIgnoringWindowID(controlItems.hidden.tag)
+            })
+        else {
+            return false
+        }
+
+        switch section {
+        case .visible:
+            return itemIndex > hiddenDividerIndex
+        case .hidden:
+            guard itemIndex < hiddenDividerIndex else { return false }
+            guard let alwaysHidden = controlItems.alwaysHidden else { return true }
+            guard let alwaysHiddenDividerIndex = orderedItems.firstIndex(where: {
+                $0.tag.matchesIgnoringWindowID(alwaysHidden.tag)
+            }) else {
+                return false
+            }
+            return itemIndex > alwaysHiddenDividerIndex
+        case .alwaysHidden:
+            guard let alwaysHidden = controlItems.alwaysHidden,
+                  let alwaysHiddenDividerIndex = orderedItems.firstIndex(where: {
+                      $0.tag.matchesIgnoringWindowID(alwaysHidden.tag)
+                  })
+            else {
+                return false
+            }
+            return itemIndex < alwaysHiddenDividerIndex
+        }
+    }
+
+    /// Returns the divider-relative destination for a section transition.
+    static nonisolated func macOS27SectionBoundaryDestination(
+        for section: MenuBarSection.Name,
+        controlItems: ControlItemPair
+    ) -> MoveDestination? {
+        switch section {
+        case .visible:
+            .rightOfItem(controlItems.hidden)
+        case .hidden:
+            .leftOfItem(controlItems.hidden)
+        case .alwaysHidden:
+            controlItems.alwaysHidden.map(MoveDestination.leftOfItem)
+        }
+    }
+
+    /// Plans a correction when MenuBarAgent publishes the hidden divider to
+    /// the right of the visible section. The divider belongs immediately before
+    /// the leftmost movable visible item; hidden assignments are excluded even
+    /// if an item is temporarily present in the AX snapshot.
+    static nonisolated func macOS27DividerMoveDestination(
+        items: [MenuBarItem],
+        sectionAssignment: [String: MenuBarSection.Name],
+        controlItems: ControlItemPair
+    ) -> MoveDestination? {
+        let divider = controlItems.hidden
+        guard divider.isOnScreen else { return nil }
+
+        let visibleAnchor = items
+            .filter { item in
+                guard !item.isSystemClone,
+                      item.isMovable,
+                      !item.isControlItem || item.tag == .visibleControlItem
+                else {
+                    return false
+                }
+                return sectionAssignment[item.uniqueIdentifier] == nil
+            }
+            .min { lhs, rhs in
+                if lhs.bounds.minX == rhs.bounds.minX {
+                    return lhs.uniqueIdentifier < rhs.uniqueIdentifier
+                }
+                return lhs.bounds.minX < rhs.bounds.minX
+            }
+
+        guard let visibleAnchor,
+              divider.bounds.maxX > visibleAnchor.bounds.minX
+        else {
+            return nil
+        }
+        return .leftOfItem(visibleAnchor)
+    }
+
+    /// Repairs assignments written by earlier macOS 27 builds that concealed
+    /// items without first moving them across a real divider. Runs only while a
+    /// hidden section is revealed, because concealed items have no AX elements.
+    func reconcileMacOS27SectionBoundaries(
+        revealing revealedSection: MenuBarSection.Name
+    ) async {
+        guard !Constants.supportsSectionHiding,
+              let appState,
+              let hider = appState.menuBarManager.simpleItemHider
+        else {
+            return
+        }
+
+        // The divider is collapsed while sections are hidden and therefore has
+        // no AX element to position. It has just been republished for this
+        // reveal, so establish the Visible/Hidden boundary before moving any
+        // assigned items around it.
+        var revealedItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+        let hiddenControlItemWindowID = appState.menuBarManager
+            .controlItem(withName: .hidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        let alwaysHiddenControlItemWindowID = appState.menuBarManager
+            .controlItem(withName: .alwaysHidden)?.window
+            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+        if let controlItems = ControlItemPair(
+            items: &revealedItems,
+            hiddenControlItemWindowID: hiddenControlItemWindowID,
+            alwaysHiddenControlItemWindowID: alwaysHiddenControlItemWindowID
+        ) {
+            await enforceControlItemOrder(
+                controlItems: controlItems,
+                items: revealedItems
+            )
+        }
+
+        let sectionsToReconcile: Set<MenuBarSection.Name> = switch revealedSection {
+        case .visible, .hidden:
+            [.hidden]
+        case .alwaysHidden:
+            [.hidden, .alwaysHidden]
+        }
+        let assignments = hider.sectionAssignment
+            .filter { sectionsToReconcile.contains($0.value) }
+            .sorted { lhs, rhs in lhs.key < rhs.key }
+
+        for (identifier, section) in assignments {
+            guard !Task.isCancelled,
+                  hider.revealedSection == revealedSection
+            else {
+                return
+            }
+
+            let liveItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            guard let liveItem = liveItems.first(where: {
+                $0.uniqueIdentifier == identifier
+            }) else {
+                continue
+            }
+
+            var itemsForControlDiscovery = liveItems
+            let hiddenControlItemWindowID = appState.menuBarManager
+                .controlItem(withName: .hidden)?.window
+                .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            let alwaysHiddenControlItemWindowID = appState.menuBarManager
+                .controlItem(withName: .alwaysHidden)?.window
+                .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            guard let controlItems = ControlItemPair(
+                items: &itemsForControlDiscovery,
+                hiddenControlItemWindowID: hiddenControlItemWindowID,
+                alwaysHiddenControlItemWindowID: alwaysHiddenControlItemWindowID
+            ),
+                !Self.macOS27LiveOrderSatisfiesSectionBoundary(
+                    items: liveItems,
+                    item: liveItem,
+                    section: section,
+                    controlItems: controlItems
+                ),
+                let destination = Self.macOS27SectionBoundaryDestination(
+                    for: section,
+                    controlItems: controlItems
+                )
+            else {
+                continue
+            }
+
+            do {
+                try await move(
+                    item: liveItem,
+                    to: destination,
+                    skipInputPause: true,
+                    watchdogTimeout: Self.layoutWatchdogTimeout,
+                    allowSectionBoundaryTargetOnMacOS27: true
+                )
+                MenuBarItemManager.diagLog.info(
+                    "Repaired macOS 27 section boundary for \(liveItem.logString)"
+                )
+            } catch {
+                MenuBarItemManager.diagLog.error(
+                    "Failed to repair macOS 27 section boundary for \(liveItem.logString): \(error)"
+                )
+            }
+        }
+
+        await cacheItemsRegardless(skipRecentMoveCheck: true)
+    }
+
     private static nonisolated func macOS27AXOrderDescription(_ items: [MenuBarItem]) -> String {
         items
             .filter { !$0.isSystemClone }
@@ -3777,10 +3991,9 @@ extension MenuBarItemManager {
         on _: CGDirectDisplayID,
         maxAttempts: Int = 2
     ) async throws {
-        /// Hide-moves (destination is a non-visible section divider) are
-        /// short-circuited in move() before reaching here because they belong to
-        /// the legacy divider-reflow path. This path only handles visible-section
-        /// reordering.
+        /// Fixed Apple anchors remain unsafe targets. Thaw's own section
+        /// dividers are deliberately movable targets: on macOS 27 they are
+        /// ordinary visible status items that separate assigned sections.
         guard !destination.targetItem.tag.isLayoutAnchoredSystemItem else {
             MenuBarItemManager.diagLog.warning(
                 "moveItemViaCommandDrag: refusing to target anchored system item \(destination.targetItem.logString)"
@@ -5371,11 +5584,41 @@ extension MenuBarItemManager {
         Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
     }
 
-    /// Enforces the order of the given control items, ensuring that the
-    /// control item for the always-hidden section is positioned to the
-    /// left of control item for the hidden section.
-    private func enforceControlItemOrder(controlItems: ControlItemPair) async {
+    /// Enforces the spatial section boundaries represented by control items.
+    private func enforceControlItemOrder(
+        controlItems: ControlItemPair,
+        items: [MenuBarItem]
+    ) async {
         let hidden = controlItems.hidden
+
+        if !Constants.supportsSectionHiding {
+            let sectionAssignment = appState?.menuBarManager.simpleItemHider?
+                .sectionAssignment ?? [:]
+            guard let destination = Self.macOS27DividerMoveDestination(
+                items: items,
+                sectionAssignment: sectionAssignment,
+                controlItems: controlItems
+            ) else {
+                return
+            }
+
+            do {
+                MenuBarItemManager.diagLog.info(
+                    "macOS 27: moving hidden divider left of the visible section"
+                )
+                try await move(
+                    item: hidden,
+                    to: destination,
+                    skipInputPause: true,
+                    allowSectionBoundaryTargetOnMacOS27: true
+                )
+            } catch {
+                MenuBarItemManager.diagLog.error(
+                    "Error enforcing macOS 27 hidden divider boundary: \(error)"
+                )
+            }
+            return
+        }
 
         guard
             let alwaysHidden = controlItems.alwaysHidden,
@@ -5788,7 +6031,7 @@ extension MenuBarItemManager {
             throw LayoutResetError.missingControlItems
         }
 
-        await enforceControlItemOrder(controlItems: controlItems)
+        await enforceControlItemOrder(controlItems: controlItems, items: items)
 
         return try await resetLayoutWithControlItems(controlItems: controlItems, items: items)
     }
