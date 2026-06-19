@@ -8,18 +8,15 @@
 
 import Cocoa
 
-/// Governs the visibility of the Apple Control Center menu-bar extras that the
-/// macOS 27 Assessment Mode allowlist *cannot* control individually.
+/// Governs the menu-bar visibility of Apple Control Center modules that the
+/// macOS 27 Assessment Mode allowlist *cannot* individually hide.
 ///
-/// The 2026-06-18 investigation proved that AirDrop, Focus, User (Fast User
-/// Switching), and Now Playing are not addressable by either Assessment Mode
-/// axis: they have no `MBSystemItemIdentifier` raw value (only the 9 core
-/// modules, 0...8, do) and their `com.apple.menuextra.*` IDs in the bundle
-/// allowlist are ignored. Whenever a restriction is active they are collaterally
-/// hidden, and nothing in the allowlist can keep them.
-///
-/// These four are, however, ordinary Control Center modules whose menu-bar
-/// visibility lives in Control Center's own **per-host** preference domain:
+/// The 2026-06-18 investigation proved Assessment Mode is all-or-nothing for
+/// system items: its allowlist keeps the core modules (raw values 0...8 — Wi-Fi,
+/// Bluetooth, Sound, …) and collateral-hides the rest (AirDrop, Focus, User,
+/// Now Playing) as a group, with no per-item control either way. So the *only*
+/// way to hide any one CC module on demand is Control Center's own **per-host**
+/// preference:
 ///
 ///     defaults -currentHost write com.apple.controlcenter <Key> -int <2|8>
 ///
@@ -28,23 +25,31 @@ import Cocoa
 /// after Control Center is relaunched (it reads the preference at launch), so
 /// this manager restarts it whenever it mutates a value.
 ///
-/// This is a *separate subsystem* from ``AssessmentModeBackend``: those modules
-/// are stripped from the assessment allowlist input and handled here instead.
-/// Note the inherent limitation — while any assessment restriction is active the
-/// four modules are collaterally hidden regardless of their preference, so this
-/// manager's visible effect is the per-item show/hide when no restriction (or no
-/// *other* hidden item) forces them off.
+/// This is a *separate subsystem* from ``AssessmentModeBackend``: governed
+/// modules are stripped from the assessment allowlist input and handled here.
+///
+/// **Inherent limitation (the residual collateral):** while *any* assessment
+/// restriction is active — i.e. whenever a non-CC (third-party) item is hidden —
+/// the non-core extras (AirDrop / Focus / User / Now Playing) are collateral-
+/// hidden by the OS regardless of their preference, and nothing in the API can
+/// keep them (`MBAssessmentModeConfiguration` exposes only systemItems +
+/// bundleIdentifiers). They self-heal when the restriction lifts. The core
+/// modules (Wi-Fi / Bluetooth) are unaffected by that collateral, so per-item
+/// CC-pref hiding is fully reliable for them.
 @MainActor
 final class ControlCenterModuleManager {
     /// Maps a MenuBarAgent extra's AX title to its Control Center per-host
     /// preference key.
     ///
-    /// AirDrop / NowPlaying / UserSwitcher are confirmed keys present in the
-    /// live `com.apple.controlcenter` per-host domain. Focus has no key until
-    /// the module is customized; `FocusModes` is the conventional name and is
-    /// written speculatively (a wrong key is an inert no-op, never harmful).
+    /// AirDrop / NowPlaying / UserSwitcher / Bluetooth / WiFi are confirmed keys
+    /// present in the live `com.apple.controlcenter` per-host domain. Focus has
+    /// no key until the module is customized; `FocusModes` is the conventional
+    /// name and is written speculatively (a wrong key is an inert no-op, never
+    /// harmful).
     nonisolated static let moduleKeysByMenuExtraTitle: [String: String] = [
         "com.apple.menuextra.airdrop": "AirDrop",
+        "com.apple.menuextra.bluetooth": "Bluetooth",
+        "com.apple.menuextra.wifi": "WiFi",
         "com.apple.menuextra.now-playing": "NowPlaying",
         "com.apple.menuextra.user": "UserSwitcher",
         "com.apple.menuextra.focusmode": "FocusModes",

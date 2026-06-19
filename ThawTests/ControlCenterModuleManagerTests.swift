@@ -53,11 +53,25 @@ final class ControlCenterModuleManagerTests: XCTestCase {
         )
     }
 
+    func testWiFiAndBluetoothAreGovernable() {
+        // Core modules with confirmed per-host keys: hideable via CC pref even
+        // though Assessment Mode keeps them in its 0...8 allowlist.
+        XCTAssertEqual(
+            ControlCenterModuleManager.governableMenuExtraTitle(
+                forItemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.wifi"
+            ),
+            "com.apple.menuextra.wifi"
+        )
+        XCTAssertEqual(
+            ControlCenterModuleManager.governableMenuExtraTitle(
+                forItemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.bluetooth"
+            ),
+            "com.apple.menuextra.bluetooth"
+        )
+    }
+
     func testNonGovernableIdentifiersReturnNil() {
-        // Core CC modules preserved by allowedSystemItems are NOT governed here.
-        XCTAssertNil(ControlCenterModuleManager.governableMenuExtraTitle(
-            forItemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.wifi"
-        ))
+        // Clock has no per-host key and is layout-anchored — not governed here.
         XCTAssertNil(ControlCenterModuleManager.governableMenuExtraTitle(
             forItemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.clock"
         ))
@@ -77,8 +91,11 @@ final class ControlCenterModuleManagerTests: XCTestCase {
         XCTAssertTrue(ControlCenterModuleManager.isGovernable(
             itemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.focusmode"
         ))
-        XCTAssertFalse(ControlCenterModuleManager.isGovernable(
+        XCTAssertTrue(ControlCenterModuleManager.isGovernable(
             itemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.bluetooth"
+        ))
+        XCTAssertFalse(ControlCenterModuleManager.isGovernable(
+            itemIdentifier: "com.apple.MenuBarAgent:com.apple.menuextra.clock"
         ))
     }
 
