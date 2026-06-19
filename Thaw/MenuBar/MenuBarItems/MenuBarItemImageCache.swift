@@ -851,6 +851,7 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
         let composite = capture.image
         let windowFrame = capture.windowFrame
         let scale = capture.scale
+        let imageBounds = CGRect(x: 0, y: 0, width: composite.width, height: composite.height)
 
         MenuBarItemImageCache.diagLog.debug(
             "axBoundsCapture: hosting window \(composite.width)×\(composite.height)px, " +
@@ -868,16 +869,24 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
             // Map the item's global (Y-down) frame into the hosting window's
             // image: subtract the window origin, then scale to pixels. CGImage
             // rows run top-down, matching the Y-down screen convention.
-            let cropRect = CGRect(
+            //
+            // `.integral` rounds the rect outward to whole pixels so a sub-pixel
+            // origin/size never shaves the glyph's edge (the intermittent "cut
+            // icon"), and the intersection clamps it inside the composite so an
+            // edge item's slightly-oversized rect can't spill past the image and
+            // either fail or capture a shifted, wrong-looking region.
+            let rawCropRect = CGRect(
                 x: (bounds.minX - windowFrame.minX) * scale,
                 y: (bounds.minY - windowFrame.minY) * scale,
                 width: bounds.width * scale,
                 height: bounds.height * scale
             )
+            let cropRect = rawCropRect.integral.intersection(imageBounds)
 
-            guard let croppedImage = composite.cropping(to: cropRect) else {
+            guard !cropRect.isNull, !cropRect.isEmpty, let croppedImage = composite.cropping(to: cropRect) else {
                 MenuBarItemImageCache.diagLog.debug(
-                    "axBoundsCapture: cropping failed for \(item.logString) cropRect=\(cropRect)"
+                    "axBoundsCapture: cropping failed for \(item.logString) " +
+                    "rawCropRect=\(rawCropRect) clamped=\(cropRect)"
                 )
                 recordCaptureFailure(for: item)
                 result.excluded.append(item)
