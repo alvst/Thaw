@@ -69,6 +69,12 @@ final class SimpleItemHider: ObservableObject {
     /// assertion).
     private let backend: AssessmentModeBackend
 
+    /// Governs Apple Control Center modules (AirDrop / Focus / User / Now Playing
+    /// / WiFi / Bluetooth) that the assessment-mode allowlist cannot hide. Items
+    /// it owns are hidden via their Control Center preference and kept out of the
+    /// backend input.
+    private let ccModuleManager: ControlCenterModuleManager
+
     private var timer: Timer?
 
     init(appState: AppState) {
@@ -76,6 +82,7 @@ final class SimpleItemHider: ObservableObject {
         self.sectionAssignment = Self.loadAssignment()
         self.sectionItemOrder = Self.loadOrder()
         self.backend = AssessmentModeBackend()
+        self.ccModuleManager = ControlCenterModuleManager()
         let assessmentModeAvailable = AssessmentModeBackend.isAvailable
         diagLog.info("hiding backend: AssessmentMode (\(assessmentModeAvailable ? "available" : "unavailable")); \(sectionAssignment.count) assigned item(s)")
     }
@@ -453,9 +460,36 @@ final class SimpleItemHider: ObservableObject {
             sectionAssignment,
             revealing: revealedSection
         )
+
+        // Apple Control Center modules cannot be hidden by the assessment-mode
+        // allowlist (proven 2026-06-18); route them to their Control Center
+        // preference instead, and strip them from the backend input.
+        //
+        // CC modules follow the *persisted* assignment, NOT the reveal-adjusted
+        // `effectiveAssignment`: changing a CC pref restarts Control Center
+        // (~1-2s blank of the whole CC area). Driving that off temporary reveals
+        // made every Thaw-icon click restart Control Center and rapid clicks
+        // thrashed it to empty. So a temporary reveal leaves CC modules as-is —
+        // they show/hide only on a real assignment change (drag to/from Hidden).
+        var ccHiddenTitles = Set<String>()
+        for (identifier, section) in sectionAssignment where section != .visible {
+            if let title = ControlCenterModuleManager.governableMenuExtraTitle(forItemIdentifier: identifier) {
+                ccHiddenTitles.insert(title)
+            }
+        }
+        ccModuleManager.apply(hiddenMenuExtraTitles: ccHiddenTitles)
+
+        // Strip CC modules from the backend input regardless of reveal state.
+        var backendAssignment = effectiveAssignment
+        for identifier in effectiveAssignment.keys
+            where ControlCenterModuleManager.isGovernable(itemIdentifier: identifier)
+        {
+            backendAssignment.removeValue(forKey: identifier)
+        }
+
         logRestrictionProbeSnapshot(reason: "before-apply", items: allItems)
         let didChangeRestriction = backend.apply(
-            sectionAssignment: effectiveAssignment,
+            sectionAssignment: backendAssignment,
             allItems: allItems
         )
         if didChangeRestriction {
