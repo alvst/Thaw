@@ -109,7 +109,7 @@ final class ControlItemDefaultsTests: XCTestCase {
         }
     }
 
-    func testRestoreVisibilityDoesNotChangeSectionDividerDefaults() {
+    func testRestoreVisibilityRepairsHiddenSectionDividerOnMacOS27() {
         let hiddenAutosaveName = ControlItem.Identifier.hidden.rawValue
         ControlItemDefaults[.visible, hiddenAutosaveName] = false
         ControlItemDefaults[.visibleCC, hiddenAutosaveName] = false
@@ -120,8 +120,13 @@ final class ControlItemDefaultsTests: XCTestCase {
 
         ControlItemDefaults.restoreVisibilityIfNeeded(autosaveName: hiddenAutosaveName)
 
-        XCTAssertEqual(ControlItemDefaults[.visible, hiddenAutosaveName], false)
-        XCTAssertEqual(ControlItemDefaults[.visibleCC, hiddenAutosaveName], false)
+        if #available(macOS 27, *) {
+            XCTAssertEqual(ControlItemDefaults[.visible, hiddenAutosaveName], true)
+            XCTAssertEqual(ControlItemDefaults[.visibleCC, hiddenAutosaveName], true)
+        } else {
+            XCTAssertEqual(ControlItemDefaults[.visible, hiddenAutosaveName], false)
+            XCTAssertEqual(ControlItemDefaults[.visibleCC, hiddenAutosaveName], false)
+        }
     }
 
     func testMacOS27VisibleControlItemDoesNotRestoreCachedPreferredPositionAfterRemoval() {
@@ -144,5 +149,202 @@ final class ControlItemDefaultsTests: XCTestCase {
         )
 
         XCTAssertFalse(shouldRestore)
+    }
+}
+
+// MARK: - ControlItem Section Divider Tests
+
+final class ControlItemSectionDividerTests: XCTestCase {
+    func testMacOS27ConcealedSectionCollapsesDividerUntilReveal() {
+        let presentation = ControlItem.sectionDividerPresentation(
+            state: .hideSection,
+            style: .chevron,
+            supportsSectionHiding: false
+        )
+
+        XCTAssertEqual(presentation, .hidden)
+    }
+
+    func testMacOS27NoDividerCollapsesConcealedSectionDivider() {
+        let presentation = ControlItem.sectionDividerPresentation(
+            state: .hideSection,
+            style: .noDivider,
+            supportsSectionHiding: false
+        )
+
+        XCTAssertEqual(presentation, .hidden)
+    }
+
+    func testLegacyConcealedSectionRetainsExpandedInvisibleDivider() {
+        let presentation = ControlItem.sectionDividerPresentation(
+            state: .hideSection,
+            style: .chevron,
+            supportsSectionHiding: true
+        )
+
+        XCTAssertEqual(presentation, .legacyConcealedSection)
+    }
+
+    func testRevealedSectionUsesConfiguredDividerStyle() {
+        XCTAssertEqual(
+            ControlItem.sectionDividerPresentation(
+                state: .showSection,
+                style: .chevron,
+                supportsSectionHiding: true
+            ),
+            .chevron
+        )
+        XCTAssertEqual(
+            ControlItem.sectionDividerPresentation(
+                state: .showSection,
+                style: .noDivider,
+                supportsSectionHiding: false
+            ),
+            .hidden
+        )
+    }
+}
+
+// MARK: - ControlItem Primary Action Tests
+
+final class ControlItemPrimaryActionTests: XCTestCase {
+    func testPlainPrimaryActionTogglesSection() {
+        XCTAssertEqual(primaryAction(), .toggleSection)
+    }
+
+    func testKeyboardPrimaryActionTogglesSection() {
+        XCTAssertEqual(primaryAction(clickCount: 0), .toggleSection)
+    }
+
+    func testControlPrimaryActionDefersToContextMenu() {
+        XCTAssertEqual(primaryAction(modifierFlags: .control), .contextMenu)
+    }
+
+    func testOptionPrimaryActionTogglesAlwaysHiddenSectionWhenEnabled() {
+        XCTAssertEqual(
+            primaryAction(modifierFlags: .option, usesOptionClick: true),
+            .toggleAlwaysHidden
+        )
+    }
+
+    func testOptionPrimaryActionDoesNothingWhenDisabled() {
+        XCTAssertEqual(primaryAction(modifierFlags: .option), .none)
+    }
+
+    func testDoublePrimaryActionShowsAlwaysHiddenSectionWhenEnabled() {
+        XCTAssertEqual(
+            primaryAction(clickCount: 2, usesDoubleClick: true),
+            .showAlwaysHidden
+        )
+    }
+
+    func testDoublePrimaryActionUsesNormalBehaviorWhenDisabled() {
+        XCTAssertEqual(primaryAction(clickCount: 2), .toggleSection)
+    }
+
+    private func primaryAction(
+        modifierFlags: NSEvent.ModifierFlags = [],
+        clickCount: Int = 1,
+        usesDoubleClick: Bool = false,
+        usesOptionClick: Bool = false
+    ) -> ControlItem.PrimaryActionIntent {
+        ControlItem.primaryActionIntent(
+            identifier: .visible,
+            modifierFlags: modifierFlags,
+            clickCount: clickCount,
+            usesDoubleClick: usesDoubleClick,
+            usesOptionClick: usesOptionClick
+        )
+    }
+}
+
+// MARK: - Control Item Context Menu Routing Tests
+
+final class ControlItemContextMenuRoutingTests: XCTestCase {
+    private let iconFrame = CGRect(x: 100, y: 900, width: 24, height: 24)
+
+    func testMacOS27RoutesClickInsideIconToControlItemMenu() {
+        XCTAssertTrue(
+            HIDEventManager.shouldShowControlItemContextMenu(
+                usesMenuBarAgent: true,
+                controlItemFrame: iconFrame,
+                clickLocation: CGPoint(x: 112, y: 912)
+            )
+        )
+    }
+
+    func testMacOS27LeavesClickOutsideIconForMenuBarContextMenu() {
+        XCTAssertFalse(
+            HIDEventManager.shouldShowControlItemContextMenu(
+                usesMenuBarAgent: true,
+                controlItemFrame: iconFrame,
+                clickLocation: CGPoint(x: 80, y: 912)
+            )
+        )
+    }
+
+    func testLegacySystemDoesNotUseGlobalControlItemMenuRoute() {
+        XCTAssertFalse(
+            HIDEventManager.shouldShowControlItemContextMenu(
+                usesMenuBarAgent: false,
+                controlItemFrame: iconFrame,
+                clickLocation: CGPoint(x: 112, y: 912)
+            )
+        )
+    }
+
+    func testMissingControlItemFrameDoesNotConsumeClick() {
+        XCTAssertFalse(
+            HIDEventManager.shouldShowControlItemContextMenu(
+                usesMenuBarAgent: true,
+                controlItemFrame: nil,
+                clickLocation: CGPoint(x: 112, y: 912)
+            )
+        )
+    }
+}
+
+// MARK: - Menu Bar Item Capture Section Tests
+
+final class MenuBarItemCaptureSectionTests: XCTestCase {
+    private let allSections = MenuBarSection.Name.allCases
+
+    func testLegacyCaptureKeepsEveryRequestedSection() {
+        XCTAssertEqual(
+            capturableSections(usesVisibilityRestrictions: false, revealedSection: nil),
+            allSections
+        )
+    }
+
+    func testMacOS27ConcealedCaptureUsesOnlyVisibleSection() {
+        XCTAssertEqual(
+            capturableSections(usesVisibilityRestrictions: true, revealedSection: nil),
+            [.visible]
+        )
+    }
+
+    func testMacOS27HiddenRevealCapturesVisibleAndHiddenSections() {
+        XCTAssertEqual(
+            capturableSections(usesVisibilityRestrictions: true, revealedSection: .hidden),
+            [.visible, .hidden]
+        )
+    }
+
+    func testMacOS27AlwaysHiddenRevealCapturesEverySection() {
+        XCTAssertEqual(
+            capturableSections(usesVisibilityRestrictions: true, revealedSection: .alwaysHidden),
+            allSections
+        )
+    }
+
+    private func capturableSections(
+        usesVisibilityRestrictions: Bool,
+        revealedSection: MenuBarSection.Name?
+    ) -> [MenuBarSection.Name] {
+        MenuBarItemImageCache.capturableSections(
+            from: allSections,
+            usesVisibilityRestrictions: usesVisibilityRestrictions,
+            revealedSection: revealedSection
+        )
     }
 }
