@@ -1000,6 +1000,24 @@ private final class MenuBarOverlayPanelContentView: NSView {
     }
 
     /// Returns a path for the ``MenuBarShapeKind/split`` shape kind.
+    /// The bounds of the trailing status items the split trailing pill wraps.
+    ///
+    /// macOS ≤26 sources these from real CGS item windows (``cachedItemWindows``).
+    /// macOS 27 status items have no CGS windows, so that list is always empty —
+    /// which left the split shape with no trailing pill to measure and collapsed
+    /// it to a single full-width pill. There, use the visible section's
+    /// AX-provided bounds from the item cache instead, so the pill wraps the
+    /// actual content.
+    private func trailingContentItemBounds() -> [CGRect] {
+        if #available(macOS 27, *) {
+            guard let appState = overlayPanel?.appState else { return [] }
+            return appState.itemManager.itemCache[.visible]
+                .map(\.bounds)
+                .filter { !$0.isEmpty }
+        }
+        return cachedItemWindows.map(\.bounds)
+    }
+
     private func pathForSplitShape(
         in rect: CGRect,
         info: MenuBarSplitShapeInfo,
@@ -1049,21 +1067,21 @@ private final class MenuBarOverlayPanelContentView: NSView {
             )
         }()
         let trailingPathBounds: CGRect = {
-            let itemWindows = cachedItemWindows
-            guard !itemWindows.isEmpty else {
+            let itemBounds = trailingContentItemBounds()
+            guard !itemBounds.isEmpty else {
                 return .zero
             }
             // Filter to only include items on this display
             let screenFrame = screen.frame
-            let displayItemWindows = itemWindows.filter { item in
-                item.bounds.midX >= screenFrame.minX && item.bounds.midX <= screenFrame.maxX
+            let displayItemBounds = itemBounds.filter { bounds in
+                bounds.midX >= screenFrame.minX && bounds.midX <= screenFrame.maxX
             }
             // If no items on this display, don't show trailing shape
-            guard !displayItemWindows.isEmpty else {
+            guard !displayItemBounds.isEmpty else {
                 return .zero
             }
-            let totalWidth = displayItemWindows.reduce(into: 0) { width, item in
-                width += item.bounds.width
+            let totalWidth = displayItemBounds.reduce(into: 0) { width, bounds in
+                width += bounds.width
             }
             var position = rect.maxX - totalWidth
             if shouldInset {
