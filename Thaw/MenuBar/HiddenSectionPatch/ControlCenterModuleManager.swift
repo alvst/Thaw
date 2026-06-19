@@ -2,9 +2,9 @@
 //  ControlCenterModuleManager.swift
 //  Project: Thaw
 //
+//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
-//
 
 import Cocoa
 
@@ -38,6 +38,47 @@ import Cocoa
 /// CC-pref hiding is fully reliable for them.
 @MainActor
 final class ControlCenterModuleManager {
+    /// Injectable side effects used to read and mutate Control Center state.
+    /// Keeping these operations actor-isolated makes the production manager
+    /// Swift 6-safe while allowing tests to use an in-memory preference domain.
+    @MainActor
+    struct Environment {
+        let readValue: @MainActor (String) -> Int?
+        let writeValue: @MainActor (Int?, String) -> Bool
+        let synchronize: @MainActor () -> Void
+        let restartControlCenter: @MainActor () -> Void
+
+        static var live: Environment {
+            Environment(
+                readValue: { ControlCenterModuleManager.readValue(forKey: $0) },
+                writeValue: { ControlCenterModuleManager.writeValue($0, forKey: $1) },
+                synchronize: { ControlCenterModuleManager.synchronize() },
+                restartControlCenter: { ControlCenterModuleManager.restartControlCenter() }
+            )
+        }
+    }
+
+    /// An exact snapshot of a preference before Thaw changes it. Absence is
+    /// distinct from an explicit value so teardown can remove keys that did not
+    /// exist before Thaw started managing the module.
+    private enum OriginalPreference {
+        case absent
+        case value(Int)
+
+        init(_ value: Int?) {
+            self = value.map(Self.value) ?? .absent
+        }
+
+        var value: Int? {
+            switch self {
+            case .absent:
+                nil
+            case let .value(value):
+                value
+            }
+        }
+    }
+
     /// Maps a MenuBarAgent extra's AX title to its Control Center per-host
     /// preference key.
     ///
@@ -46,7 +87,7 @@ final class ControlCenterModuleManager {
     /// no key until the module is customized; `FocusModes` is the conventional
     /// name and is written speculatively (a wrong key is an inert no-op, never
     /// harmful).
-    nonisolated static let moduleKeysByMenuExtraTitle: [String: String] = [
+    static nonisolated let moduleKeysByMenuExtraTitle: [String: String] = [
         "com.apple.menuextra.airdrop": "AirDrop",
         "com.apple.menuextra.bluetooth": "Bluetooth",
         "com.apple.menuextra.wifi": "WiFi",
@@ -56,31 +97,36 @@ final class ControlCenterModuleManager {
     ]
 
     /// The per-host preference value that shows a module in the menu bar.
-    nonisolated static let shownValue = 2
+    static nonisolated let shownValue = 2
 
     /// The per-host preference value that hides a module from the menu bar.
-    nonisolated static let hiddenValue = 8
+    static nonisolated let hiddenValue = 8
 
     private static let domain = "com.apple.controlcenter" as CFString
     private static let controlCenterBundleID = "com.apple.controlcenter"
 
     private let diagLog = DiagLog(category: "ControlCenterModuleManager")
+    private let environment: Environment
 
     /// The menu-extra titles currently hidden by this manager.
     private var appliedHidden: Set<String> = []
 
-    /// The pre-hide preference value to restore for each hidden module, captured
-    /// while it was still shown so a non-default user preference survives.
-    private var originalValues: [String: Int] = [:]
+    /// The exact pre-hide preference to restore for each hidden module.
+    private var originalValues: [String: OriginalPreference] = [:]
 
     /// Retains the block-based termination observer for the app's lifetime (this
     /// manager is owned by `SimpleItemHider`, which lives the whole session).
     private var terminationObserver: NSObjectProtocol?
 
-    init() {
+    init(
+        environment: Environment = .live,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        self.environment = environment
+
         // Restore the user's modules if Thaw quits while it has any hidden, so a
         // CC-pref hide never outlives the app that applied it.
-        terminationObserver = NotificationCenter.default.addObserver(
+        terminationObserver = notificationCenter.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
@@ -94,7 +140,7 @@ final class ControlCenterModuleManager {
     /// The governable menu-extra title embedded in an item `uniqueIdentifier`
     /// such as `com.apple.MenuBarAgent:com.apple.menuextra.airdrop`, or `nil` if
     /// the identifier is not one of the Control Center modules this manager owns.
-    nonisolated static func governableMenuExtraTitle(forItemIdentifier identifier: String) -> String? {
+    static nonisolated func governableMenuExtraTitle(forItemIdentifier identifier: String) -> String? {
         for title in moduleKeysByMenuExtraTitle.keys
             where identifier == title || identifier.hasSuffix(":\(title)")
         {
@@ -106,7 +152,7 @@ final class ControlCenterModuleManager {
     /// Whether the given item `uniqueIdentifier` is a Control Center module this
     /// manager governs (and therefore should be kept out of the assessment-mode
     /// allowlist input).
-    nonisolated static func isGovernable(itemIdentifier identifier: String) -> Bool {
+    static nonisolated func isGovernable(itemIdentifier identifier: String) -> Bool {
         governableMenuExtraTitle(forItemIdentifier: identifier) != nil
     }
 
@@ -131,19 +177,16 @@ final class ControlCenterModuleManager {
 
         for title in desired.subtracting(appliedHidden) {
             guard let key = Self.moduleKeysByMenuExtraTitle[title] else { continue }
-            let current = Self.readValue(forKey: key) ?? Self.shownValue
-            if current != Self.hiddenValue {
-                originalValues[title] = current
-            }
-            if Self.writeValue(Self.hiddenValue, forKey: key) {
+            originalValues[title] = OriginalPreference(environment.readValue(key))
+            if environment.writeValue(Self.hiddenValue, key) {
                 changed = true
             }
         }
 
         for title in appliedHidden.subtracting(desired) {
             guard let key = Self.moduleKeysByMenuExtraTitle[title] else { continue }
-            let restore = originalValues.removeValue(forKey: title) ?? Self.shownValue
-            if Self.writeValue(restore, forKey: key) {
+            let restore = originalValues.removeValue(forKey: title) ?? .value(Self.shownValue)
+            if environment.writeValue(restore.value, key) {
                 changed = true
             }
         }
@@ -151,8 +194,8 @@ final class ControlCenterModuleManager {
         appliedHidden = desired
 
         if changed {
-            Self.synchronize()
-            Self.restartControlCenter()
+            environment.synchronize()
+            environment.restartControlCenter()
             diagLog.info("applied CC module visibility; hidden=\(desired.sorted())")
         }
         return changed
@@ -177,17 +220,27 @@ final class ControlCenterModuleManager {
     }
 
     @discardableResult
-    private static func writeValue(_ value: Int, forKey key: String) -> Bool {
+    private static func writeValue(_ value: Int?, forKey key: String) -> Bool {
         if readValue(forKey: key) == value {
             return false
         }
-        CFPreferencesSetValue(
-            key as CFString,
-            value as CFNumber,
-            domain,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesCurrentHost
-        )
+        if let value {
+            CFPreferencesSetValue(
+                key as CFString,
+                value as CFNumber,
+                domain,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesCurrentHost
+            )
+        } else {
+            CFPreferencesSetValue(
+                key as CFString,
+                nil,
+                domain,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesCurrentHost
+            )
+        }
         return true
     }
 
