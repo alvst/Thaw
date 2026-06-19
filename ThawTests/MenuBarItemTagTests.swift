@@ -990,6 +990,115 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
         )
     }
 
+    func testMacOS27SectionBoundaryRequiresHiddenDividerBetweenSections() {
+        let hidden = appItem(
+            bundleID: "com.example.hidden",
+            title: "Hidden",
+            x: 0,
+            windowID: 50
+        )
+        let divider = item(tag: .hiddenControlItem, x: 24, windowID: 51)
+        let visible = appItem(
+            bundleID: "com.example.visible",
+            title: "Visible",
+            x: 48,
+            windowID: 52
+        )
+        let controls = MenuBarItemManager.ControlItemPair(
+            hidden: divider,
+            alwaysHidden: nil
+        )
+        let orderedItems = [hidden, divider, visible]
+
+        XCTAssertEqual(
+            MenuBarItemManager.macOS27SectionBoundaryDestination(
+                for: .hidden,
+                controlItems: controls
+            ),
+            .leftOfItem(divider)
+        )
+        XCTAssertEqual(
+            MenuBarItemManager.macOS27SectionBoundaryDestination(
+                for: .visible,
+                controlItems: controls
+            ),
+            .rightOfItem(divider)
+        )
+
+        XCTAssertTrue(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesSectionBoundary(
+                items: orderedItems,
+                item: hidden,
+                section: .hidden,
+                controlItems: controls
+            )
+        )
+        XCTAssertTrue(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesSectionBoundary(
+                items: orderedItems,
+                item: visible,
+                section: .visible,
+                controlItems: controls
+            )
+        )
+        XCTAssertFalse(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesSectionBoundary(
+                items: orderedItems,
+                item: visible,
+                section: .hidden,
+                controlItems: controls
+            )
+        )
+        XCTAssertFalse(
+            MenuBarItemManager.macOS27LiveOrderSatisfiesSectionBoundary(
+                items: orderedItems,
+                item: hidden,
+                section: .visible,
+                controlItems: controls
+            )
+        )
+    }
+
+    func testMacOS27DividerMovesLeftOfLeftmostVisibleItem() {
+        let thaw = item(tag: .visibleControlItem, x: 0, windowID: 60)
+        let divider = item(tag: .hiddenControlItem, x: 24, windowID: 61)
+        let hidden = appItem(
+            bundleID: "com.example.hidden",
+            title: "Hidden",
+            x: 48,
+            windowID: 62
+        )
+        let controls = MenuBarItemManager.ControlItemPair(
+            hidden: divider,
+            alwaysHidden: nil
+        )
+
+        XCTAssertEqual(
+            MenuBarItemManager.macOS27DividerMoveDestination(
+                items: [thaw, divider, hidden],
+                sectionAssignment: [hidden.uniqueIdentifier: .hidden],
+                controlItems: controls
+            ),
+            .leftOfItem(thaw)
+        )
+
+        let correctlyPlacedDivider = item(
+            tag: .hiddenControlItem,
+            x: -24,
+            windowID: 63
+        )
+        XCTAssertNil(
+            MenuBarItemManager.macOS27DividerMoveDestination(
+                items: [correctlyPlacedDivider, thaw, hidden],
+                sectionAssignment: [hidden.uniqueIdentifier: .hidden],
+                controlItems: .init(
+                    hidden: correctlyPlacedDivider,
+                    alwaysHidden: nil
+                )
+            )
+        )
+    }
+
     private func appItem(
         bundleID: String,
         title: String,
