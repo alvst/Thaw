@@ -241,12 +241,14 @@ enum LayoutSolver {
         alwaysHiddenTags: Set<MenuBarItemTag>,
         effectiveNewItemsSection: MenuBarSection.Name
     ) -> LeftmostMove {
-        // Items sitting left of the hidden divider. The Thaw icon is a
-        // control item but must always be visible, so we admit it here.
+        // Items sitting left of the hidden divider. This is a legacy reflow
+        // planner, so use legacy movability rather than macOS 27's broader
+        // layout-anchor policy. The Thaw icon is a control item but must always
+        // be visible, so we admit it here.
         let leftmostItems = items
             .filter {
                 $0.bounds.maxX <= observation.hiddenBounds.minX &&
-                    $0.isMovable &&
+                    $0.tag.isMovableInLegacySectionLayout &&
                     (!$0.isControlItem || $0.tag == .visibleControlItem)
             }
             .sorted { $0.bounds.minX < $1.bounds.minX }

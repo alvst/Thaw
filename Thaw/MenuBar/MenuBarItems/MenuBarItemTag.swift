@@ -73,6 +73,16 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
         !isLayoutAnchoredSystemItem
     }
 
+    /// Whether the item can participate in the legacy divider-based layout
+    /// used on macOS 26 and earlier. This policy is intentionally independent
+    /// of the host OS so legacy planners remain deterministic when their tests
+    /// run on macOS 27, where additional agents are layout anchors.
+    var isMovableInLegacySectionLayout: Bool {
+        !MenuBarItemTag.legacyImmovableItems.contains {
+            $0.namespace == namespace && $0.title == title
+        }
+    }
+
     /// A Boolean value that indicates whether the item identified
     /// by this tag can be hidden.
     var canBeHidden: Bool {
@@ -189,6 +199,15 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
 
 extension MenuBarItemTag {
     // MARK: Special Item Lists
+
+    /// Fixed items in the legacy Control Center-hosted layout. Keep this list
+    /// explicit rather than deriving it from the current OS namespace.
+    private static let legacyImmovableItems: [MenuBarItemTag] = [
+        MenuBarItemTag(namespace: .controlCenter, title: "Clock"),
+        MenuBarItemTag(namespace: .controlCenter, title: "BentoBox-0"),
+        siri,
+        ssMenuAgent,
+    ]
 
     /// An array of tags for items whose movement is prevented by macOS.
     ///
