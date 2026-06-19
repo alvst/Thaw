@@ -348,6 +348,7 @@ final class MenuBarSection {
                     section.updateControlItemState(for: nil)
                 }
             }
+            refreshRevealedItemImages()
             startRehideChecks()
             return
         }
@@ -434,6 +435,42 @@ final class MenuBarSection {
         }
 
         startRehideChecks()
+    }
+
+    /// Refreshes menu-item snapshots and captures real glyphs while macOS 27
+    /// has the requested section temporarily present in MenuBarAgent. Once the
+    /// section is concealed again, these captures replace the app-icon fallback
+    /// in layout/search surfaces.
+    private func refreshRevealedItemImages() {
+        guard let appState else { return }
+        let revealedName = name == .alwaysHidden ? Name.alwaysHidden : Name.hidden
+        let sections: [Name] = revealedName == .alwaysHidden
+            ? Name.allCases
+            : [.visible, .hidden]
+
+        Task { @MainActor [weak appState] in
+            // Let MenuBarAgent republish the revealed AX elements and allow the
+            // boundary reconciliation pass to settle their final coordinates.
+            try? await Task.sleep(for: .milliseconds(500))
+            guard
+                let appState,
+                !Task.isCancelled,
+                appState.menuBarManager.simpleItemHider?.revealedSection == revealedName
+            else {
+                return
+            }
+
+            await appState.itemManager.cacheItemsRegardless(
+                skipRecentMoveCheck: true,
+                resolveSourcePID: false,
+                skipSavedLayoutApply: true
+            )
+
+            guard appState.menuBarManager.simpleItemHider?.revealedSection == revealedName else {
+                return
+            }
+            await appState.imageCache.updateCacheWithoutChecks(sections: sections)
+        }
     }
 
     /// Hides the section.
