@@ -297,6 +297,16 @@ final class MenuBarItemTagTests: XCTestCase {
         XCTAssertTrue(tag.isMovable)
     }
 
+    func testLegacyMovabilityIsIndependentFromMacOS27Anchoring() {
+        let screenCapture = MenuBarItemTag.screenCaptureUI
+        let legacyClock = MenuBarItemTag(namespace: .controlCenter, title: "Clock")
+
+        XCTAssertTrue(screenCapture.isLayoutAnchoredSystemItem)
+        XCTAssertFalse(screenCapture.isMovable)
+        XCTAssertTrue(screenCapture.isMovableInLegacySectionLayout)
+        XCTAssertFalse(legacyClock.isMovableInLegacySectionLayout)
+    }
+
     func testMacOS27OnlyTrailingSystemItemsAreAnchored() throws {
         guard #available(macOS 27, *) else {
             throw XCTSkip("MenuBarAgent anchoring is macOS 27-specific")
