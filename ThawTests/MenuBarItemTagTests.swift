@@ -276,6 +276,34 @@ final class MenuBarItemTagTests: XCTestCase {
         XCTAssertFalse(tag.isSystemItem)
     }
 
+    func testAppleStringNamespaceIsNonConcealableSystemItem() {
+        let spotlight = MenuBarItemTag(
+            namespace: .string("com.apple.campo"),
+            title: "Spotlight"
+        )
+
+        XCTAssertFalse(spotlight.isSystemItem)
+        XCTAssertTrue(spotlight.isNonConcealableSystemItem)
+    }
+
+    func testMenuBarAgentItemIsNonConcealableSystemItem() {
+        let sound = MenuBarItemTag(
+            namespace: .menuBarAgent,
+            title: "com.apple.menuextra.sound"
+        )
+
+        XCTAssertTrue(sound.isNonConcealableSystemItem)
+    }
+
+    func testThirdPartyItemIsConcealable() {
+        let tag = MenuBarItemTag(
+            namespace: .string("com.thirdparty.app"),
+            title: "SomeItem"
+        )
+
+        XCTAssertFalse(tag.isNonConcealableSystemItem)
+    }
+
     // MARK: - Movable Tests
 
     func testClockIsNotMovable() {
@@ -953,6 +981,36 @@ final class MacOS27LayoutAnchorOrderingTests: XCTestCase {
         ])
 
         XCTAssertEqual(sanitized, [appID: .hidden])
+    }
+
+    func testAssignmentFromProfileLayoutUsesSectionMapAndFallsBackToOrder() {
+        let hiddenApp = "com.example.alpha:Alpha"
+        let visibleApp = "com.example.beta:Beta"
+        let alwaysHiddenApp = "com.example.gamma:Gamma"
+        let thawControl = "\(MenuBarItemTag.Namespace.thaw):\(ControlItem.Identifier.hidden.rawValue)"
+
+        let fromMap = SimpleItemHider.assignment(
+            from: [
+                hiddenApp: "hidden",
+                visibleApp: "visible",
+                alwaysHiddenApp: "alwaysHidden",
+                thawControl: "hidden",
+            ],
+            itemOrder: [:]
+        )
+        XCTAssertEqual(fromMap, [
+            hiddenApp: .hidden,
+            alwaysHiddenApp: .alwaysHidden,
+        ])
+
+        let fromOrder = SimpleItemHider.assignment(
+            from: [:],
+            itemOrder: [
+                "visible": [visibleApp],
+                "hidden": [hiddenApp, thawControl],
+            ]
+        )
+        XCTAssertEqual(fromOrder, [hiddenApp: .hidden])
     }
 
     func testMacOS27LiveOrderRequiresFreshAXAdjacency() {
