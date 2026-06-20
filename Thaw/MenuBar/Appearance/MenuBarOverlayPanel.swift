@@ -590,6 +590,37 @@ private final class MenuBarOverlayPanelContentView: NSView {
     /// being queried synchronously during each `draw(_:)` call.
     private var cachedItemWindows: [WindowInfo] = []
 
+    /// Physical status-item bounds used by the split trailing pill on macOS 27.
+    /// The logical item-cache sections cannot be used for this: Apple items can
+    /// remain physically visible while assigned Hidden, and concealed-item
+    /// snapshots can retain stale on-screen bounds. A fresh AXExtrasMenuBar walk
+    /// is the source of truth for what the pill must wrap.
+    private var cachedAXItemBounds: [CGRect] = []
+
+    /// Last non-empty trailing bounds, kept during AX refresh so concealing
+    /// Hidden does not briefly fall back to a full-width pill.
+    private var lastNonEmptyAXItemBounds: [CGRect] = []
+
+    /// Last successfully drawn split-pill rectangles. Used while geometry is
+    /// frozen or when a transitional AX read would intersect / fall back to full.
+    private var lastStableLeadingPathBounds: CGRect = .zero
+    private var lastStableTrailingPathBounds: CGRect = .zero
+
+    /// When true, ``pathForSplitShape`` keeps drawing ``lastStableLeadingPathBounds``
+    /// and ``lastStableTrailingPathBounds`` until the pending AX refresh finishes.
+    private var splitPillGeometryFrozen = false
+
+    /// Debounces AX geometry refreshes while MenuBarAgent is reflowing items.
+    private var axItemBoundsRefreshTask: Task<Void, Never>?
+
+    /// Delay for the in-flight or next AX bounds refresh.
+    private var axItemBoundsRefreshDelay: Duration = .milliseconds(200)
+
+    /// Set by publishers while an AX refresh is pending/in flight. The refresh
+    /// loop consumes this flag and performs one follow-up pass if geometry
+    /// changed during the previous pass, avoiding cancel/restart starvation.
+    private var needsAXItemBoundsRefresh = false
+
     /// In-flight confirmation task for settling the trailing item-window cache
     /// after an app switch. Cancelled and replaced whenever a new
     /// applicationMenuFrame value arrives so that only the latest app's icon
@@ -671,7 +702,40 @@ private final class MenuBarOverlayPanelContentView: NSView {
                         .receive(on: DispatchQueue.main)
                         .sink { [weak self] _ in
                             self?.updateCachedItemWindows()
-                            self?.needsDisplay = true
+                            if #available(macOS 27, *) {
+                                self?.scheduleAXItemBoundsRefresh()
+                            } else {
+                                self?.needsDisplay = true
+                            }
+                        }
+                        .store(in: &c)
+                }
+
+                // macOS 27: refresh the split pill from physical AX geometry after
+                // the item cache has been published. `objectWillChange` fires before
+                // assignment and used to redraw from stale/partial section buckets.
+                if #available(macOS 27, *) {
+                    appState.itemManager.$itemCache
+                        .removeDuplicates()
+                        .receive(on: DispatchQueue.main)
+                        .sink { [weak self] _ in
+                            self?.scheduleAXItemBoundsRefresh()
+                        }
+                        .store(in: &c)
+
+                    appState.menuBarManager.simpleItemHider?.$revealedSection
+                        .receive(on: DispatchQueue.main)
+                        .sink { [weak self] revealed in
+                            guard let self else { return }
+                            // Hold the last stable split shape while MenuBarAgent
+                            // reflows; intermediate AX reads intersect or go empty
+                            // and flash a full-width fallback pill.
+                            splitPillGeometryFrozen = true
+                            needsDisplay = true
+                            let delay: Duration = revealed == nil
+                                ? .milliseconds(350)
+                                : .milliseconds(200)
+                            scheduleAXItemBoundsRefresh(delay: delay)
                         }
                         .store(in: &c)
                 }
@@ -709,6 +773,191 @@ private final class MenuBarOverlayPanelContentView: NSView {
 
         // Populate the cache immediately so the first draw has data.
         updateCachedItemWindows()
+        if #available(macOS 27, *) {
+            scheduleAXItemBoundsRefresh(delay: .zero)
+        }
+    }
+
+    /// Refreshes the physical macOS 27 status-item span after MenuBarAgent has
+    /// settled. Repeated cache/frame/reveal events cancel the prior task, so a
+    /// reordering burst costs one AX walk and publishes one final redraw.
+    @available(macOS 27, *)
+    private func scheduleAXItemBoundsRefresh(
+        delay: Duration = .milliseconds(200)
+    ) {
+        axItemBoundsRefreshDelay = delay
+        needsAXItemBoundsRefresh = true
+        axItemBoundsRefreshTask?.cancel()
+        axItemBoundsRefreshTask = nil
+
+        guard let displayID = overlayPanel?.owningScreen.displayID else {
+            cachedAXItemBounds = []
+            needsDisplay = true
+            return
+        }
+
+        axItemBoundsRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while needsAXItemBoundsRefresh, !Task.isCancelled {
+                needsAXItemBoundsRefresh = false
+                let refreshDelay = axItemBoundsRefreshDelay
+                try? await Task.sleep(for: refreshDelay)
+                guard !Task.isCancelled else { break }
+
+                let items = await MenuBarItem.getMenuBarItems(
+                    on: displayID,
+                    option: [.onScreen, .activeSpace]
+                )
+                guard !Task.isCancelled else { break }
+
+                let hider = overlayPanel?.appState?.menuBarManager.simpleItemHider
+                let bounds = Self.trailingPillBounds(
+                    from: items,
+                    hider: hider
+                )
+                cachedAXItemBounds = bounds
+                if !bounds.isEmpty {
+                    lastNonEmptyAXItemBounds = bounds
+                }
+                needsDisplay = true
+            }
+            splitPillGeometryFrozen = false
+            needsDisplay = true
+            axItemBoundsRefreshTask = nil
+        }
+    }
+
+    /// Maximum horizontal gap between adjacent status items that still belong
+    /// to the same live cluster. Must span the Thaw chevron between assigned-
+    /// Hidden modules (left) and visible-section modules (right). Stale ghost
+    /// frames in the empty hidden reservation sit much farther left.
+    @available(macOS 27, *)
+    private static let trailingPillClusterMaxGap: CGFloat = 96
+
+    /// Bounds that the split trailing pill should wrap on macOS 27.
+    @available(macOS 27, *)
+    private static func trailingPillBounds(
+        from items: [MenuBarItem],
+        hider: SimpleItemHider?
+    ) -> [CGRect] {
+        let isRevealingHidden = hider?.revealedSection == .hidden
+            || hider?.revealedSection == .alwaysHidden
+        let isRevealingAlwaysHidden = hider?.revealedSection == .alwaysHidden
+
+        let candidates = items.compactMap { item -> CGRect? in
+            guard shouldIncludeInTrailingPill(
+                item,
+                hider: hider,
+                isRevealingHidden: isRevealingHidden,
+                isRevealingAlwaysHidden: isRevealingAlwaysHidden
+            ) else {
+                return nil
+            }
+            return item.bounds
+        }
+
+        guard !isRevealingHidden, candidates.count > 1 else {
+            return candidates
+        }
+
+        let clusterGap = if let visibleControl = items.first(where: { $0.tag == .visibleControlItem }),
+                            !visibleControl.bounds.isEmpty
+        {
+            max(trailingPillClusterMaxGap, visibleControl.bounds.width + 32)
+        } else {
+            trailingPillClusterMaxGap
+        }
+
+        let chevronFrame = items.first(where: { $0.tag == .visibleControlItem })?.bounds
+        return rightmostContiguousCluster(
+            from: candidates,
+            maxGap: clusterGap,
+            bridgingFrame: chevronFrame
+        )
+    }
+
+    /// Returns the rightmost group of bounds whose members are within `maxGap`
+    /// of their neighbor. Orphan frames in the collapsed hidden slot sit well
+    /// to the left of the live icon run and form their own smaller cluster.
+    ///
+    /// When `bridgingFrame` is set (the Thaw chevron while Hidden is concealed),
+    /// a gap that overlaps that frame is treated as contiguous so assigned-Hidden
+    /// modules left of the chevron stay in the same pill as visible-section icons.
+    @available(macOS 27, *)
+    private static func rightmostContiguousCluster(
+        from bounds: [CGRect],
+        maxGap: CGFloat,
+        bridgingFrame: CGRect? = nil
+    ) -> [CGRect] {
+        let sorted = bounds.sorted { $0.minX < $1.minX }
+        guard let first = sorted.first else {
+            return []
+        }
+
+        var clusters: [[CGRect]] = []
+        var current = [first]
+
+        for rect in sorted.dropFirst() {
+            guard let previous = current.last else {
+                current.append(rect)
+                continue
+            }
+            let gap = rect.minX - previous.maxX
+            let bridgesChevron = if let bridgingFrame, !bridgingFrame.isEmpty {
+                previous.maxX < bridgingFrame.maxX && rect.minX > bridgingFrame.minX
+            } else {
+                false
+            }
+            if gap <= maxGap || bridgesChevron {
+                current.append(rect)
+            } else {
+                clusters.append(current)
+                current = [rect]
+            }
+        }
+        clusters.append(current)
+
+        return clusters.max(by: { ($0.last?.maxX ?? 0) < ($1.last?.maxX ?? 0) }) ?? sorted
+    }
+
+    /// Whether a live status item should contribute to the split trailing pill.
+    ///
+    /// When Hidden is concealed, exclude only the Thaw chevron and section
+    /// dividers. Assigned-Hidden modules often sit immediately left of the
+    /// chevron and must stay inside the pill; stale ghost frames in the empty
+    /// hidden reservation are dropped by ``rightmostContiguousCluster(from:maxGap:)``.
+    @available(macOS 27, *)
+    private static func shouldIncludeInTrailingPill(
+        _ item: MenuBarItem,
+        hider: SimpleItemHider?,
+        isRevealingHidden: Bool,
+        isRevealingAlwaysHidden: Bool
+    ) -> Bool {
+        let isHiddenSectionDivider = item.isControlItem
+            && item.tag != .visibleControlItem
+        guard !item.isSystemClone,
+              !isHiddenSectionDivider,
+              item.isOnScreen,
+              !item.bounds.isEmpty
+        else {
+            return false
+        }
+
+        guard let hider else {
+            return true
+        }
+
+        if isRevealingHidden {
+            if item.tag == .visibleControlItem {
+                return true
+            }
+            if hider.section(for: item) == .alwaysHidden, !isRevealingAlwaysHidden {
+                return false
+            }
+            return true
+        }
+
+        return item.tag != .visibleControlItem
     }
 
     /// Refreshes the cached menu bar item windows from the Window Server.
@@ -749,6 +998,8 @@ private final class MenuBarOverlayPanelContentView: NSView {
             itemWindowsConfirmTask?.cancel()
             itemWindowsConfirmTask = nil
             cachedItemWindows = []
+            needsDisplay = true
+            scheduleAXItemBoundsRefresh()
             return
         }
         // Hoist displayID before entering the Task so that no AppKit
@@ -1003,19 +1254,117 @@ private final class MenuBarOverlayPanelContentView: NSView {
     /// The bounds of the trailing status items the split trailing pill wraps.
     ///
     /// macOS ≤26 sources these from real CGS item windows (``cachedItemWindows``).
-    /// macOS 27 status items have no CGS windows, so that list is always empty —
-    /// which left the split shape with no trailing pill to measure and collapsed
-    /// it to a single full-width pill. There, use the visible section's
-    /// AX-provided bounds from the item cache instead, so the pill wraps the
-    /// actual content.
+    /// macOS 27 status items have no CGS windows, so use a debounced physical AX
+    /// snapshot. This deliberately ignores logical section assignment: Apple
+    /// items assigned Hidden can remain on screen, while concealed-item snapshots
+    /// can retain stale bounds. The pill must wrap what is physically present.
     private func trailingContentItemBounds() -> [CGRect] {
         if #available(macOS 27, *) {
-            guard let appState = overlayPanel?.appState else { return [] }
-            return appState.itemManager.itemCache[.visible]
-                .map(\.bounds)
-                .filter { !$0.isEmpty }
+            if cachedAXItemBounds.isEmpty, !lastNonEmptyAXItemBounds.isEmpty {
+                return lastNonEmptyAXItemBounds
+            }
+            return cachedAXItemBounds
         }
         return cachedItemWindows.map(\.bounds)
+    }
+
+    /// Computes the leading pill rectangle from the application menu frame.
+    ///
+    /// The legacy offset-based width formula double-counted overlay origin
+    /// coordinates and could leave a wide empty shelf inside the pill. Cap the
+    /// trailing edge at the first status item so macOS 27 menu-bar unions that
+    /// swallow the status area do not stretch the leading pill.
+    private func computeLeadingPathBounds(
+        applicationMenuFrame: CGRect,
+        trailingContentMinX: CGFloat?,
+        in rect: CGRect,
+        shouldInset: Bool,
+        leadingEndCap: MenuBarEndCap,
+        appearanceManager: MenuBarAppearanceManager
+    ) -> CGRect {
+        guard applicationMenuFrame.width > 0 else { return .zero }
+
+        let leftX = rect.minX + fullConfiguration.leftMargin
+        let trailingPadding: CGFloat = {
+            if shouldInset {
+                var padding: CGFloat = 10
+                if leadingEndCap == .square {
+                    padding += appearanceManager.menuBarInsetAmount
+                }
+                return padding
+            }
+            if #available(macOS 27, *) {
+                return 12
+            }
+            return 20
+        }()
+
+        var rightX = applicationMenuFrame.maxX + trailingPadding
+        if let trailingContentMinX {
+            rightX = min(rightX, trailingContentMinX - 4)
+        }
+
+        return CGRect(
+            x: leftX,
+            y: rect.minY,
+            width: max(0, rightX - leftX),
+            height: rect.height
+        )
+    }
+
+    /// Computes the trailing pill rectangle from the union of item bounds.
+    ///
+    /// Summing individual widths underestimates the span whenever icons have
+    /// gaps between them, which leaves the leftmost items outside the pill.
+    private func computeTrailingPathBounds(
+        itemBounds: [CGRect],
+        in rect: CGRect,
+        shouldInset: Bool,
+        trailingEndCap: MenuBarEndCap,
+        screen: NSScreen,
+        appearanceManager: MenuBarAppearanceManager
+    ) -> CGRect {
+        guard !itemBounds.isEmpty else { return .zero }
+
+        let screenFrame = screen.frame
+        let displayItemBounds = itemBounds.filter { bounds in
+            bounds.midX >= screenFrame.minX && bounds.midX <= screenFrame.maxX
+        }
+        guard
+            let contentMinX = displayItemBounds.map(\.minX).min(),
+            let contentMaxX = displayItemBounds.map(\.maxX).max()
+        else {
+            return .zero
+        }
+
+        let leadingOutset: CGFloat = {
+            if shouldInset {
+                var outset: CGFloat = 4
+                if trailingEndCap == .square {
+                    outset += appearanceManager.menuBarInsetAmount
+                }
+                return outset
+            }
+            // AX status-item frames already include the button's internal
+            // leading padding. Adding the legacy CGS 7 pt outset on macOS 27
+            // leaves a conspicuous empty shelf before the first glyph (e.g.
+            // AirPods). Start the rounded cap at the physical item frame.
+            if #available(macOS 27, *) {
+                return 0
+            }
+            return 7
+        }()
+        let trailingOutset: CGFloat = shouldInset ? 4 : 7
+
+        let leftX = contentMinX - leadingOutset
+        let rightX = contentMaxX + trailingOutset
+
+        return CGRect(
+            x: leftX,
+            y: rect.minY,
+            width: max(0, rightX - leftX),
+            height: rect.height
+        )
     }
 
     private func pathForSplitShape(
@@ -1041,68 +1390,101 @@ private final class MenuBarOverlayPanelContentView: NSView {
             }
         }
 
-        let leadingPathBounds: CGRect = {
+        let computedLeadingPathBounds: CGRect = {
             guard
                 let applicationMenuFrame = overlayPanel?.applicationMenuFrame,
                 applicationMenuFrame.width > 0
             else {
                 return .zero
             }
-            // Calculate offset to account for menu position relative to rect origin
-            let offset = applicationMenuFrame.origin.x - rect.minX
-            var maxX = applicationMenuFrame.maxX
-            if shouldInset {
-                maxX += 10
-                if info.leading.leadingEndCap == .square {
-                    maxX += appearanceManager.menuBarInsetAmount
-                }
-            } else {
-                maxX += 20
-            }
-            return CGRect(
-                x: rect.minX + fullConfiguration.leftMargin,
-                y: rect.minY,
-                width: max(0, maxX - offset - fullConfiguration.leftMargin),
-                height: rect.height
+            let trailingContentMinX = trailingContentItemBounds().map(\.minX).min()
+            return computeLeadingPathBounds(
+                applicationMenuFrame: applicationMenuFrame,
+                trailingContentMinX: trailingContentMinX,
+                in: rect,
+                shouldInset: shouldInset,
+                leadingEndCap: info.leading.leadingEndCap,
+                appearanceManager: appearanceManager
             )
         }()
-        let trailingPathBounds: CGRect = {
+        let computedTrailingPathBounds: CGRect = {
             let itemBounds = trailingContentItemBounds()
-            guard !itemBounds.isEmpty else {
-                return .zero
-            }
-            // Filter to only include items on this display
-            let screenFrame = screen.frame
-            let displayItemBounds = itemBounds.filter { bounds in
-                bounds.midX >= screenFrame.minX && bounds.midX <= screenFrame.maxX
-            }
-            // If no items on this display, don't show trailing shape
-            guard !displayItemBounds.isEmpty else {
-                return .zero
-            }
-            let totalWidth = displayItemBounds.reduce(into: 0) { width, bounds in
-                width += bounds.width
-            }
-            var position = rect.maxX - totalWidth
-            if shouldInset {
-                position += 4
-                if info.trailing.trailingEndCap == .square {
-                    position -= appearanceManager.menuBarInsetAmount
-                }
-            } else {
-                position -= 7
-            }
-            return CGRect(
-                x: position,
-                y: rect.minY,
-                width: max(0, (rect.maxX - fullConfiguration.rightMargin) - position),
-                height: rect.height
+            return computeTrailingPathBounds(
+                itemBounds: itemBounds,
+                in: rect,
+                shouldInset: shouldInset,
+                trailingEndCap: info.trailing.trailingEndCap,
+                screen: screen,
+                appearanceManager: appearanceManager
             )
         }()
 
+        let resolvedBounds = resolveSplitPathBounds(
+            leading: computedLeadingPathBounds,
+            trailing: computedTrailingPathBounds
+        )
+
+        return splitShapePath(
+            leadingPathBounds: resolvedBounds.leading,
+            trailingPathBounds: resolvedBounds.trailing,
+            info: info,
+            in: rect,
+            screen: screen
+        )
+    }
+
+    /// Picks drawable split-pill rectangles, preferring the last stable pair
+    /// while geometry is frozen or when a fresh read would fall back to full.
+    private func resolveSplitPathBounds(
+        leading: CGRect,
+        trailing: CGRect
+    ) -> (leading: CGRect, trailing: CGRect) {
+        if splitPillGeometryFrozen,
+           lastStableLeadingPathBounds != .zero || lastStableTrailingPathBounds != .zero
+        {
+            return (lastStableLeadingPathBounds, lastStableTrailingPathBounds)
+        }
+
+        if leading != .zero, trailing != .zero, !leading.intersects(trailing) {
+            lastStableLeadingPathBounds = leading
+            lastStableTrailingPathBounds = trailing
+            return (leading, trailing)
+        }
+
+        if leading != .zero, trailing == .zero {
+            lastStableLeadingPathBounds = leading
+            if lastStableTrailingPathBounds != .zero {
+                return (leading, lastStableTrailingPathBounds)
+            }
+            return (leading, .zero)
+        }
+
+        if lastStableLeadingPathBounds != .zero || lastStableTrailingPathBounds != .zero {
+            return (lastStableLeadingPathBounds, lastStableTrailingPathBounds)
+        }
+
+        return (leading, trailing)
+    }
+
+    /// Builds the split shape from resolved leading/trailing rectangles.
+    private func splitShapePath(
+        leadingPathBounds: CGRect,
+        trailingPathBounds: CGRect,
+        info: MenuBarSplitShapeInfo,
+        in rect: CGRect,
+        screen: NSScreen
+    ) -> NSBezierPath {
         if leadingPathBounds == .zero || trailingPathBounds == .zero
             || leadingPathBounds.intersects(trailingPathBounds)
         {
+            if leadingPathBounds != .zero, trailingPathBounds == .zero {
+                return shapePath(
+                    in: leadingPathBounds,
+                    leadingEndCap: info.leading.leadingEndCap,
+                    trailingEndCap: info.leading.trailingEndCap,
+                    screen: screen
+                )
+            }
             var fallbackRect = rect
             fallbackRect.origin.x += fullConfiguration.leftMargin
             fallbackRect.size.width -= (fullConfiguration.leftMargin + fullConfiguration.rightMargin)
@@ -1112,24 +1494,24 @@ private final class MenuBarOverlayPanelContentView: NSView {
                 trailingEndCap: info.trailing.trailingEndCap,
                 screen: screen
             )
-        } else {
-            let leadingPath = shapePath(
-                in: leadingPathBounds,
-                leadingEndCap: info.leading.leadingEndCap,
-                trailingEndCap: info.leading.trailingEndCap,
-                screen: screen
-            )
-            let trailingPath = shapePath(
-                in: trailingPathBounds,
-                leadingEndCap: info.trailing.leadingEndCap,
-                trailingEndCap: info.trailing.trailingEndCap,
-                screen: screen
-            )
-            let path = NSBezierPath()
-            path.append(leadingPath)
-            path.append(trailingPath)
-            return path
         }
+
+        let leadingPath = shapePath(
+            in: leadingPathBounds,
+            leadingEndCap: info.leading.leadingEndCap,
+            trailingEndCap: info.leading.trailingEndCap,
+            screen: screen
+        )
+        let trailingPath = shapePath(
+            in: trailingPathBounds,
+            leadingEndCap: info.trailing.leadingEndCap,
+            trailingEndCap: info.trailing.trailingEndCap,
+            screen: screen
+        )
+        let path = NSBezierPath()
+        path.append(leadingPath)
+        path.append(trailingPath)
+        return path
     }
 
     /// Returns the bounds that the view's drawn content can occupy.
