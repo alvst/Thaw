@@ -41,6 +41,24 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
         }
     }
 
+    /// A Boolean value that indicates whether this item is owned by an Apple
+    /// system process that Thaw cannot reliably conceal or reorder on macOS 27.
+    ///
+    /// These items (Sound/Wi-Fi/Bluetooth/AirDrop under MenuBarAgent, Spotlight
+    /// under `com.apple.campo`, Siri under SystemUIServer, …) report
+    /// ``canBeHidden`` but their bundle keeps anchored siblings visible, so the
+    /// assertion never conceals them, and the synthetic ⌘-drag does not reliably
+    /// move them. They are managed best-effort and must be excluded from
+    /// layout-divergence detection so a perpetually-stuck one cannot drive an
+    /// infinite layout re-apply loop.
+    ///
+    /// Broader than ``isSystemItem``: that misses agents exposed under a
+    /// `.string` namespace (e.g. Spotlight's `com.apple.campo`), so this also
+    /// matches any `com.apple.*` owner.
+    var isNonConcealableSystemItem: Bool {
+        isSystemItem || namespace.description.hasPrefix("com.apple.")
+    }
+
     /// A Boolean value that indicates whether this item should be rendered as a
     /// fixed system anchor in the layout UI.
     ///
