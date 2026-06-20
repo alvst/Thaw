@@ -914,10 +914,15 @@ final class MenuBarItemImageCache: ObservableObject, @unchecked Sendable {
         scale: CGFloat,
         appState: AppState
     ) async -> CaptureResult {
-        // Thaw's own control items always capture as transparent via
-        // CGWindowListCreateImage, so skip them to avoid the perpetual
-        // fail -> blacklist -> cooldown -> retry cycle.
-        let capturable = items.filter { !$0.isControlItem }
+        // Thaw's section-divider control items capture as transparent via
+        // CGWindowListCreateImage on macOS <=26, so skip them there. On macOS
+        // 27 the visible Thaw icon is composited inside MenuBarAgent and crops
+        // correctly from the hosting-window screenshot (axBoundsCapture).
+        let capturable: [MenuBarItem] = if #available(macOS 27, *) {
+            items.filter { !$0.isControlItem || $0.tag == .visibleControlItem }
+        } else {
+            items.filter { !$0.isControlItem }
+        }
 
         // macOS 27: status items live inside MenuBarAgent — no real CGWindowIDs.
         // Skip the CGS/SkyLight path entirely and use AX-provided bounds with a
