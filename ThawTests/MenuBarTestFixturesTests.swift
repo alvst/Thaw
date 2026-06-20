@@ -242,6 +242,24 @@ final class ControlItemPrimaryActionTests: XCTestCase {
         XCTAssertEqual(primaryAction(clickCount: 2), .toggleSection)
     }
 
+    func testMenuBarAgentPrimaryActionIgnoresControlModifier() {
+        XCTAssertEqual(
+            menuBarAgentPrimaryAction(modifierFlags: .control),
+            .toggleSection
+        )
+    }
+
+    func testMenuBarAgentPrimaryActionKeepsOptionAndDoubleClickBehavior() {
+        XCTAssertEqual(
+            menuBarAgentPrimaryAction(modifierFlags: .option, usesOptionClick: true),
+            .toggleAlwaysHidden
+        )
+        XCTAssertEqual(
+            menuBarAgentPrimaryAction(clickCount: 2, usesDoubleClick: true),
+            .showAlwaysHidden
+        )
+    }
+
     private func primaryAction(
         modifierFlags: NSEvent.ModifierFlags = [],
         clickCount: Int = 1,
@@ -249,6 +267,21 @@ final class ControlItemPrimaryActionTests: XCTestCase {
         usesOptionClick: Bool = false
     ) -> ControlItem.PrimaryActionIntent {
         ControlItem.primaryActionIntent(
+            identifier: .visible,
+            modifierFlags: modifierFlags,
+            clickCount: clickCount,
+            usesDoubleClick: usesDoubleClick,
+            usesOptionClick: usesOptionClick
+        )
+    }
+
+    private func menuBarAgentPrimaryAction(
+        modifierFlags: NSEvent.ModifierFlags = [],
+        clickCount: Int = 1,
+        usesDoubleClick: Bool = false,
+        usesOptionClick: Bool = false
+    ) -> ControlItem.PrimaryActionIntent {
+        ControlItem.menuBarAgentPrimaryActionIntent(
             identifier: .visible,
             modifierFlags: modifierFlags,
             clickCount: clickCount,
