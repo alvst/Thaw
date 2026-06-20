@@ -96,7 +96,11 @@ enum MenuBarItemAXProvider {
                 }
                 // Restrict to the requested display when one is given.
                 if let displayBounds {
-                    guard frame.midY >= displayBounds.minY, frame.midY <= displayBounds.maxY else {
+                    guard frame.midY >= displayBounds.minY,
+                          frame.midY <= displayBounds.maxY,
+                          frame.midX >= displayBounds.minX,
+                          frame.midX <= displayBounds.maxX
+                    else {
                         continue
                     }
                 }
