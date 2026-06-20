@@ -825,11 +825,7 @@ extension NSScreen {
                 let menuBar = AXHelpers.element(at: displayBounds.origin),
                 AXHelpers.role(for: menuBar) == .menuBar
             {
-                let applicationMenuFrame = AXHelpers.children(for: menuBar).reduce(into: CGRect.null) { result, child in
-                    if AXHelpers.isEnabled(child), let childFrame = AXHelpers.frame(for: child) {
-                        result = result.union(childFrame)
-                    }
-                }
+                let applicationMenuFrame = AXHelpers.applicationMenuChildFrameUnion(for: menuBar)
                 if !applicationMenuFrame.isNull, applicationMenuFrame.width > 0 {
                     // If we got a valid width, assume it starts at the screen's left edge.
                     return CGRect(x: frame.minX, y: applicationMenuFrame.minY, width: applicationMenuFrame.width, height: applicationMenuFrame.height)
@@ -843,18 +839,17 @@ extension NSScreen {
             return nil
         }
 
-        guard
-            let menuBar = AXHelpers.element(at: displayBounds.origin),
-            AXHelpers.role(for: menuBar) == .menuBar
-        else {
+        let menuBar = AXHelpers.element(at: displayBounds.origin).flatMap { element in
+            AXHelpers.role(for: element) == .menuBar ? element : nil
+        } ?? NSWorkspace.shared.menuBarOwningApplication
+            .flatMap(AXHelpers.application(for:))
+            .flatMap(AXHelpers.menuBar(for:))
+
+        guard let menuBar else {
             return nil
         }
 
-        let applicationMenuFrame = AXHelpers.children(for: menuBar).reduce(into: CGRect.null) { result, child in
-            if AXHelpers.isEnabled(child), let childFrame = AXHelpers.frame(for: child) {
-                result = result.union(childFrame)
-            }
-        }
+        let applicationMenuFrame = AXHelpers.applicationMenuChildFrameUnion(for: menuBar)
 
         if applicationMenuFrame.width <= 0 || applicationMenuFrame.isNull {
             return nil
