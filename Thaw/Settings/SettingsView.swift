@@ -71,7 +71,7 @@ struct SettingsView: View {
         HStack(spacing: 5) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.yellow)
-            Text("Experimental support for macOS 27 beta - some features may be unavailable or unreliable")
+            Text("Experimental support for macOS 27 beta - some features may be unreliable")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
         }
