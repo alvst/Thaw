@@ -43,6 +43,13 @@ enum AXHelpers {
         queue.sync { try? app.attribute(.extrasMenuBar) }
     }
 
+    /// The application's normal menu bar (Apple menu + app menus).
+    /// Unlike point hit-testing, this remains reliable when Thaw's overlay panel
+    /// occupies the screen's menu-bar origin on macOS 27.
+    static func menuBar(for app: Application) -> UIElement? {
+        queue.sync { try? app.attribute(.menuBar) }
+    }
+
     static func children(for element: UIElement) -> [UIElement] {
         queue.sync { try? element.arrayAttribute(.children) } ?? []
     }
@@ -67,6 +74,32 @@ enum AXHelpers {
 
     static func role(for element: UIElement) -> Role? {
         queue.sync { try? element.role() }
+    }
+
+    /// Unions the frames of application menu titles in a menu bar element.
+    ///
+    /// On macOS 27 the menu bar's AX children can include status-item hosts;
+    /// unioning every child made the split leading pill swallow the status
+    /// area. Keep only menu-bar item roles there.
+    static func applicationMenuChildFrameUnion(for menuBar: UIElement) -> CGRect {
+        children(for: menuBar).reduce(into: CGRect.null) { result, child in
+            guard isEnabled(child), let childFrame = frame(for: child) else {
+                return
+            }
+            if #available(macOS 27, *) {
+                guard let role = role(for: child) else {
+                    return
+                }
+                switch role {
+                case .menuBarItem, .menuItem:
+                    result = result.union(childFrame)
+                default:
+                    break
+                }
+            } else {
+                result = result.union(childFrame)
+            }
+        }
     }
 
     /// The element's `AXTitle`, when present. On macOS 27 most menu bar
