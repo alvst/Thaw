@@ -281,6 +281,7 @@ final class SimpleItemHider: ObservableObject {
     func setSectionOrder(_ identifiers: [String], for section: MenuBarSection.Name) {
         sectionItemOrder[section] = identifiers
         persistOrder()
+        appState?.itemManager.mirrorMacOS27SectionOrder(identifiers, for: section)
         diagLog.info("setSectionOrder(\(section.rawValue)); \(identifiers.count) item(s)")
     }
 
@@ -439,6 +440,73 @@ final class SimpleItemHider: ObservableObject {
         persistAssignment()
         diagLog.info("resetAssignment; \(sectionAssignment.count) assigned item(s)")
         refresh()
+    }
+
+    /// Applies a profile or saved-layout spec on macOS 27. Section membership
+    /// is written through the assignment model; intra-section order is persisted
+    /// per section. Visible entries are omitted from the assignment map.
+    func applyProfileLayout(
+        itemSectionMap: [String: String],
+        itemOrder: [String: [String]]
+    ) {
+        var assignment = Self.assignment(
+            from: itemSectionMap,
+            itemOrder: itemOrder
+        )
+        sectionAssignment = Self.sanitizedSectionAssignment(assignment)
+        persistAssignment()
+
+        var newOrder = [MenuBarSection.Name: [String]]()
+        for (sectionKey, identifiers) in itemOrder {
+            guard let section = MenuBarSection.Name(rawValue: sectionKey) else { continue }
+            let filtered = identifiers.filter(Self.isPersistableProfileOrderIdentifier)
+            if !filtered.isEmpty {
+                newOrder[section] = filtered
+            }
+        }
+        sectionItemOrder = newOrder
+        persistOrder()
+        diagLog.info(
+            "applyProfileLayout; \(sectionAssignment.count) assigned item(s), order sections=\(sectionItemOrder.keys.map(\.rawValue))"
+        )
+        refresh()
+    }
+
+    /// Builds a non-visible section assignment from profile layout fields.
+    static func assignment(
+        from itemSectionMap: [String: String],
+        itemOrder: [String: [String]]
+    ) -> [String: MenuBarSection.Name] {
+        var assignment = [String: MenuBarSection.Name]()
+        for (identifier, sectionKey) in itemSectionMap {
+            guard let section = MenuBarSection.Name(rawValue: sectionKey),
+                  section != .visible,
+                  isPersistableProfileOrderIdentifier(identifier)
+            else {
+                continue
+            }
+            assignment[identifier] = section
+        }
+
+        if assignment.isEmpty {
+            for (sectionKey, identifiers) in itemOrder {
+                guard let section = MenuBarSection.Name(rawValue: sectionKey),
+                      section != .visible
+                else {
+                    continue
+                }
+                for identifier in identifiers where isPersistableProfileOrderIdentifier(identifier) {
+                    assignment[identifier] = section
+                }
+            }
+        }
+
+        return assignment
+    }
+
+    private static func isPersistableProfileOrderIdentifier(_ identifier: String) -> Bool {
+        !isControlItemAssignmentIdentifier(identifier) &&
+            !isOwnAppAssignmentIdentifier(identifier)
     }
 
     /// Last-known snapshots of assigned items, captured while they were still
