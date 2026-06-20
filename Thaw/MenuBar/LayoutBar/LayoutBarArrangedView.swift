@@ -77,13 +77,22 @@ extension LayoutBarArrangedView: NSDraggingSource {
         }
     }
 
-    func draggingSession(_: NSDraggingSession, endedAt _: NSPoint, operation _: NSDragOperation) {
+    func draggingSession(_ session: NSDraggingSession, endedAt _: NSPoint, operation: NSDragOperation) {
         let sourceContainer = oldContainerInfo?.container
         defer {
             oldContainerInfo = nil
         }
 
         isDraggingPlaceholder = false
+
+        // Successful drops reset this in `performDragOperation`. Cancelled or
+        // rejected drags never reach that path, so restore updates here.
+        if operation == [] {
+            if let container = superview as? LayoutBarContainer {
+                container.canSetArrangedViews = true
+            }
+            sourceContainer?.canSetArrangedViews = true
+        }
 
         if isNewItemsBadge {
             sourceContainer?.canSetArrangedViews = true
