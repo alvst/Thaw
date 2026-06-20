@@ -799,6 +799,27 @@ final class ControlItem: NSObject {
         return .toggleSection
     }
 
+    /// Resolves macOS 27 semantic primary activation for the visible control item.
+    ///
+    /// Control-click context menus are routed through ``HIDEventManager`` on
+    /// `leftMouseDown`. `primaryActionTriggered` can inherit stale modifier
+    /// flags from `NSApp.currentEvent`, so the control bit is ignored here.
+    static nonisolated func menuBarAgentPrimaryActionIntent(
+        identifier: Identifier,
+        modifierFlags: NSEvent.ModifierFlags,
+        clickCount: Int,
+        usesDoubleClick: Bool,
+        usesOptionClick: Bool
+    ) -> PrimaryActionIntent {
+        if usesDoubleClick, clickCount > 1, identifier == .visible {
+            return .showAlwaysHidden
+        }
+        if modifierFlags.contains(.option) {
+            return usesOptionClick ? .toggleAlwaysHidden : .none
+        }
+        return .toggleSection
+    }
+
     /// Handles macOS 27's semantic primary action for the visible control item.
     /// Control-click and right-click context menus are routed through
     /// `HIDEventManager` because MenuBarAgent does not forward secondary
@@ -815,7 +836,7 @@ final class ControlItem: NSObject {
         }
 
         let event = NSApp.currentEvent
-        let intent = Self.primaryActionIntent(
+        let intent = Self.menuBarAgentPrimaryActionIntent(
             identifier: identifier,
             modifierFlags: event?.modifierFlags ?? [],
             clickCount: event?.clickCount ?? 0,
@@ -824,23 +845,25 @@ final class ControlItem: NSObject {
         )
         let menuBarManager = appState.menuBarManager
 
-        Task {
-            switch intent {
-            case .toggleSection:
-                if let section = menuBarManager.section(withName: sectionName), section.isEnabled {
-                    section.toggle()
-                }
-            case .showAlwaysHidden:
-                if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
-                    section.show()
-                }
-            case .toggleAlwaysHidden:
-                if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
-                    section.toggle()
-                }
-            case .contextMenu, .none:
-                break
+        // Run synchronously on the main actor. Deferring through `Task` let
+        // rapid clicks queue conflicting show/hide toggles before
+        // `revealedSection` settled, which made hide feel like it needed
+        // multiple clicks.
+        switch intent {
+        case .toggleSection:
+            if let section = menuBarManager.section(withName: sectionName), section.isEnabled {
+                section.toggle()
             }
+        case .showAlwaysHidden:
+            if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
+                section.show()
+            }
+        case .toggleAlwaysHidden:
+            if let section = menuBarManager.section(withName: .alwaysHidden), section.isEnabled {
+                section.toggle()
+            }
+        case .contextMenu, .none:
+            break
         }
     }
 
