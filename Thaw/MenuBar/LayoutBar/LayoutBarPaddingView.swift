@@ -100,6 +100,23 @@ final class LayoutBarPaddingView: NSView {
     override func draggingEnded(_ sender: NSDraggingInfo) {
         guard !isStabilizing else { return }
         container.updateArrangedViewsForDrag(with: sender, phase: .ended)
+        restoreArrangedViewsAfterDrag(from: sender)
+    }
+
+    /// Re-enables cache-driven layout updates when a drag ends without a
+    /// successful drop (cancelled or rejected). `performDragOperation` resets
+    /// the flag on success; without this, a cancelled drag leaves every
+    /// container frozen and the bars stop accepting moves.
+    private func restoreArrangedViewsAfterDrag(from draggingInfo: NSDraggingInfo) {
+        guard let draggingSource = draggingInfo.draggingSource as? LayoutBarArrangedView else {
+            container.canSetArrangedViews = true
+            return
+        }
+        let sourceContainer = draggingSource.oldContainerInfo?.container
+        container.canSetArrangedViews = true
+        if sourceContainer !== container {
+            sourceContainer?.canSetArrangedViews = true
+        }
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -135,44 +152,59 @@ final class LayoutBarPaddingView: NSView {
         // Command-drag the live item across that divider and only commit the new
         // assignment after AX order verifies the physical transition.
         if !Constants.supportsSectionHiding {
+            if draggingSource.isNewItemsBadge {
+                let sourceContainer = draggingSource.oldContainerInfo?.container
+                container.appState?.itemManager.updateNewItemsPlacement(
+                    section: container.section,
+                    arrangedViews: arrangedViews
+                )
+                draggingSource.oldContainerInfo = nil
+                container.canSetArrangedViews = true
+                sourceContainer?.canSetArrangedViews = true
+                if let appState = container.appState {
+                    sourceContainer?.setArrangedViews(items: appState.itemManager.itemCache.managedItems(for: sourceContainer?.section ?? container.section))
+                    if sourceContainer !== container {
+                        container.setArrangedViews(items: appState.itemManager.itemCache.managedItems(for: container.section))
+                    }
+                }
+                return true
+            }
+
             let sourceContainer = draggingSource.oldContainerInfo?.container
-            if case let .item(item) = draggingSource.kind, !item.isControlItem {
-                guard item.isMovable else {
-                    Self.diagLog.warning("Ignoring drag for anchored system item \(item.logString)")
-                    container.updateArrangedViewsForDrag(with: sender, phase: .exited)
-                    draggingSource.hasContainer = false
-                    draggingSource.oldContainerInfo = nil
-                    container.canSetArrangedViews = true
-                    sourceContainer?.canSetArrangedViews = true
-                    return false
-                }
+            guard case let .item(item) = draggingSource.kind, !item.isControlItem else {
+                container.canSetArrangedViews = true
+                sourceContainer?.canSetArrangedViews = true
+                draggingSource.oldContainerInfo = nil
+                return false
+            }
 
-                let hider = container.appState?.menuBarManager.simpleItemHider
-                let sourceSection = sourceContainer?.section ?? container.section
-                let wasVisible = sourceSection == .visible
-                let orderedItems = orderedLayoutItems()
+            guard item.isMovable else {
+                Self.diagLog.warning("Ignoring drag for anchored system item \(item.logString)")
+                container.updateArrangedViewsForDrag(with: sender, phase: .exited)
+                draggingSource.hasContainer = false
+                draggingSource.oldContainerInfo = nil
+                container.canSetArrangedViews = true
+                sourceContainer?.canSetArrangedViews = true
+                return false
+            }
 
-                if sourceSection != container.section {
-                    moveAcrossMacOS27SectionBoundary(
-                        item: item,
-                        from: sourceSection,
-                        sourceContainer: sourceContainer,
-                        sectionOrderToCommit: orderedItems
-                    )
-                    draggingSource.oldContainerInfo = nil
-                    return true
-                }
+            let hider = container.appState?.menuBarManager.simpleItemHider
+            let sourceSection = sourceContainer?.section ?? container.section
+            let orderedItems = orderedLayoutItems()
 
-                // Physically reorder the real menu bar within Visible. Hidden
-                // sections retain their persisted layout-bar order while
-                // concealed and are physically anchored during transitions.
-                //
-                // Same-visible reorders are transactional: do not persist the
-                // visual order until the real AX order verifies, otherwise the
-                // cache can replay the intended order and make a failed physical
-                // move look successful.
-                if container.section == .visible, wasVisible,
-                   let index = arrangedViews.firstIndex(of: draggingSource) {
+            if sourceSection != container.section {
+                moveAcrossMacOS27SectionBoundary(
+                    item: item,
+                    from: sourceSection,
+                    sourceContainer: sourceContainer,
+                    sectionOrderToCommit: orderedItems
+                )
+                draggingSource.oldContainerInfo = nil
+                return true
+            }
+
+            if let index = arrangedViews.firstIndex(of: draggingSource) {
+                if macOS27SectionIsPhysicallyLive(container.section, hider: hider) {
                     let destination: MenuBarItemManager.MoveDestination? =
                         if let target = nearestItem(toRightOf: index, requiringMovable: true) {
                             .leftOfItem(target)
@@ -182,9 +214,6 @@ final class LayoutBarPaddingView: NSView {
                             nil
                         }
                     if let destination {
-                        // `move()` re-enables canSetArrangedViews and refreshes
-                        // the cache after it stabilizes; it commits the visible
-                        // order only after the physical move verifies.
                         move(
                             item: item,
                             to: destination,
@@ -195,27 +224,36 @@ final class LayoutBarPaddingView: NSView {
                         return true
                     }
 
-                    Self.diagLog.info("macOS 27: refusing visible reorder for \(item.logString); no movable neighbor in this segment")
-                    if let appState = container.appState {
-                        Task { await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true) }
+                    if container.section == .visible {
+                        Self.diagLog.info("macOS 27: refusing visible reorder for \(item.logString); no movable neighbor in this segment")
+                        if let appState = container.appState {
+                            Task { await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true) }
+                        }
+                        draggingSource.oldContainerInfo = nil
+                        container.canSetArrangedViews = true
+                        sourceContainer?.canSetArrangedViews = true
+                        return false
                     }
-                    draggingSource.oldContainerInfo = nil
-                    container.canSetArrangedViews = true
-                    sourceContainer?.canSetArrangedViews = true
-                    return false
                 }
 
+                // Concealed sections only persist layout-bar order; the items
+                // are snapshots with no live AX element to Command-drag.
                 hider?.setSection(container.section, item: item)
                 hider?.setSectionOrder(from: orderedItems, for: container.section)
 
                 if let appState = container.appState {
                     Task { await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true) }
                 }
+                draggingSource.oldContainerInfo = nil
+                container.canSetArrangedViews = true
+                sourceContainer?.canSetArrangedViews = true
+                return true
             }
+
             draggingSource.oldContainerInfo = nil
             container.canSetArrangedViews = true
             sourceContainer?.canSetArrangedViews = true
-            return true
+            return false
         }
 
         if draggingSource.isNewItemsBadge {
@@ -306,7 +344,13 @@ final class LayoutBarPaddingView: NSView {
 
         Task { [weak self, weak appState] in
             guard let self, let appState else { return }
-            guard !isStabilizing else { return }
+            guard !isStabilizing else {
+                container.canSetArrangedViews = true
+                if sourceContainer !== container {
+                    sourceContainer?.canSetArrangedViews = true
+                }
+                return
+            }
             isStabilizing = true
             showOverlay(true)
 
@@ -409,7 +453,13 @@ final class LayoutBarPaddingView: NSView {
         }
         Task { [weak self, weak appState] in
             guard let self, let appState else { return }
-            guard !isStabilizing else { return }
+            guard !isStabilizing else {
+                await MainActor.run {
+                    self.container.canSetArrangedViews = true
+                    sourceContainer?.canSetArrangedViews = true
+                }
+                return
+            }
             isStabilizing = true
             await MainActor.run { self.showOverlay(true) }
             // Increased delay to allow macOS to settle after operations like Reset Layout.
@@ -417,6 +467,12 @@ final class LayoutBarPaddingView: NSView {
             do {
                 try await Task.sleep(for: .milliseconds(150))
             } catch {
+                await MainActor.run {
+                    self.isStabilizing = false
+                    self.showOverlay(false)
+                    self.container.canSetArrangedViews = true
+                    sourceContainer?.canSetArrangedViews = true
+                }
                 return
             }
 
@@ -553,6 +609,24 @@ final class LayoutBarPaddingView: NSView {
         return false
     }
 
+    /// Whether items in the section currently have live AX elements to reorder.
+    private func macOS27SectionIsPhysicallyLive(
+        _ section: MenuBarSection.Name,
+        hider: SimpleItemHider?
+    ) -> Bool {
+        switch section {
+        case .visible:
+            return true
+        case .hidden:
+            guard let revealed = hider?.revealedSection else {
+                return false
+            }
+            return revealed == .hidden || revealed == .alwaysHidden
+        case .alwaysHidden:
+            return hider?.revealedSection == .alwaysHidden
+        }
+    }
+
     private func orderedLayoutItems() -> [MenuBarItem] {
         arrangedViews.compactMap { view in
             if case let .item(item) = view.kind, !item.isControlItem {
@@ -569,7 +643,7 @@ final class LayoutBarPaddingView: NSView {
         for candidateIndex in (index + 1) ..< arrangedViews.count {
             if case let .item(item) = arrangedViews[candidateIndex].kind {
                 if requiringMovable, item.isControlItem || !item.isMovable {
-                    return nil
+                    continue
                 }
                 return item
             }
@@ -584,7 +658,7 @@ final class LayoutBarPaddingView: NSView {
         for candidateIndex in stride(from: index - 1, through: 0, by: -1) {
             if case let .item(item) = arrangedViews[candidateIndex].kind {
                 if requiringMovable, item.isControlItem || !item.isMovable {
-                    return nil
+                    continue
                 }
                 return item
             }
