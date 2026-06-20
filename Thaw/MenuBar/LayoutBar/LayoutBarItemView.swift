@@ -57,7 +57,7 @@ final class LayoutBarItemView: LayoutBarArrangedView {
     init(appState: AppState, item: MenuBarItem) {
         self.item = item
         self.appState = appState
-        self.placeholderImage = Self.makePlaceholderImage(for: item)
+        self.placeholderImage = Self.makePlaceholderImage(for: item, appState: appState)
 
         let initialImage = appState.imageCache.image(for: item.tag)
         self.cachedImage = initialImage
@@ -127,6 +127,21 @@ final class LayoutBarItemView: LayoutBarArrangedView {
                     self.cachedImage = image
                 }
                 .store(in: &c)
+
+            if item.tag == .visibleControlItem,
+               let controlItem = appState.menuBarManager.section(withName: .visible)?.controlItem
+            {
+                controlItem.$state
+                    .combineLatest(
+                        appState.settings.general.$iceIcon,
+                        appState.settings.general.$customIceIconIsTemplate
+                    )
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] _ in
+                        self?.needsDisplay = true
+                    }
+                    .store(in: &c)
+            }
         }
 
         cancellables = c
@@ -221,7 +236,15 @@ final class LayoutBarItemView: LayoutBarArrangedView {
         return CGSize(width: width, height: height)
     }
 
-    private static func makePlaceholderImage(for item: MenuBarItem) -> NSImage? {
+    private static func makePlaceholderImage(for item: MenuBarItem, appState: AppState) -> NSImage? {
+        if item.tag == .visibleControlItem {
+            let icon = appState.settings.general.iceIcon
+            let state = appState.menuBarManager.section(withName: .visible)?.controlItem.state ?? .hideSection
+            return switch state {
+            case .showSection: icon.visible.nsImage(for: appState)
+            case .hideSection: icon.hidden.nsImage(for: appState)
+            }
+        }
         if let icon = item.sourceApplication?.icon ?? item.owningApplication?.icon {
             return icon
         }
@@ -248,7 +271,7 @@ final class LayoutBarItemView: LayoutBarArrangedView {
         backgroundPath.lineWidth = 1
         backgroundPath.stroke()
 
-        guard let placeholderImage else {
+        guard let image = currentPlaceholderImage() else {
             return
         }
 
@@ -268,8 +291,8 @@ final class LayoutBarItemView: LayoutBarArrangedView {
             height: iconSide
         )
 
-        if placeholderImage.isTemplate {
-            let tinted = placeholderImage.copy() as? NSImage
+        if image.isTemplate {
+            let tinted = image.copy() as? NSImage
             tinted?.isTemplate = true
             NSColor.secondaryLabelColor.set()
             tinted?.draw(
@@ -279,13 +302,20 @@ final class LayoutBarItemView: LayoutBarArrangedView {
                 fraction: isEnabled ? 0.8 : 0.5
             )
         } else {
-            placeholderImage.draw(
+            image.draw(
                 in: iconRect,
                 from: .zero,
                 operation: .sourceOver,
                 fraction: isEnabled ? 0.9 : 0.5
             )
         }
+    }
+
+    private func currentPlaceholderImage() -> NSImage? {
+        if item.tag == .visibleControlItem, let appState {
+            return Self.makePlaceholderImage(for: item, appState: appState)
+        }
+        return placeholderImage
     }
 
     private func placeholderBitmapImage() -> NSImage? {
