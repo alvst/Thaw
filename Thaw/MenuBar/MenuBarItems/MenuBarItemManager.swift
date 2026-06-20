@@ -436,6 +436,27 @@ final class MenuBarItemManager: ObservableObject {
         UserDefaults.standard.set(savedSectionOrder, forKey: key)
     }
 
+    /// Mirrors a macOS 27 layout-bar drop into the legacy saved-order gate
+    /// immediately. The AX window signature changes as the drop/reveal settles;
+    /// without this synchronous mirror, `applySavedLayout` can run before the
+    /// next cache pass and restore the previous order ~100 ms after a valid drop.
+    func mirrorMacOS27SectionOrder(
+        _ identifiers: [String],
+        for section: MenuBarSection.Name
+    ) {
+        guard !Constants.supportsSectionHiding else { return }
+        let key = sectionKey(for: section)
+        if identifiers.isEmpty {
+            savedSectionOrder.removeValue(forKey: key)
+        } else {
+            savedSectionOrder[key] = identifiers
+        }
+        persistSavedSectionOrder()
+        MenuBarItemManager.diagLog.debug(
+            "Mirrored macOS 27 layout drop into saved order for \(section.logString): \(identifiers.count) item(s)"
+        )
+    }
+
     /// Extracts the current per-section item order from the given cache and
     /// persists it. Skips the write when the order has not changed.
     /// For items currently in the cache, uses their current section.
@@ -1900,16 +1921,30 @@ extension MenuBarItemManager {
             isRestoringItemOrderTimestamp = nil
         }
 
-        // macOS 27 persists section membership through SimpleItemHider, not the
-        // position-derived savedSectionOrder — skip the legacy save entirely so
-        // the two sources of truth never fight.
-        if Constants.supportsSectionHiding, LayoutSolver.shouldPersistSavedOrder(
+        let shouldPersistLayoutSnapshot = LayoutSolver.shouldPersistSavedOrder(
             isRestoringItemOrder: isRestoringItemOrder,
             isResettingLayout: isResettingLayout,
             isInStartupSettling: isInStartupSettling,
             isApplyingProfileLayout: isApplyingProfileLayout,
             temporarilyShownItemContextsIsEmpty: temporarilyShownItemContexts.isEmpty
-        ) {
+        )
+
+        // macOS 27 persists section membership through SimpleItemHider, not the
+        // position-derived savedSectionOrder. Mirror the curated section order
+        // from itemCache so profiles, defaults, and applySavedLayout stay in
+        // sync with the layout bars without fighting the assignment model.
+        if !Constants.supportsSectionHiding, shouldPersistLayoutSnapshot {
+            let mirrored = computeSectionOrder(from: context.cache)
+            if mirrored != savedSectionOrder {
+                savedSectionOrder = mirrored
+                persistSavedSectionOrder()
+                MenuBarItemManager.diagLog.debug(
+                    "Mirrored macOS 27 section order: \(mirrored.mapValues(\.count))"
+                )
+            }
+        }
+
+        if Constants.supportsSectionHiding, shouldPersistLayoutSnapshot {
             // Don't persist if any items are in a transient blocked state (x=-1).
             // Wait for the next cache cycle when bounds are reliable.
             let hasBlockedItems = MenuBarSection.Name.allCases.contains { section in
@@ -3704,8 +3739,16 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         destination: MoveDestination
     ) -> Bool {
+        // Anchored system items (Spotlight, AirDrop, Sound, Control Center, Siri,
+        // Clock) are immovable on macOS 27 and frequently sit *between* the items
+        // being ordered. They must be excluded before measuring adjacency:
+        // otherwise an item that is already correctly left of its target — but
+        // separated from it by an anchored item — reads as unsatisfied, so the
+        // reconcile retries a move that can never make them strictly adjacent,
+        // exhausts its attempts, and reapplies the whole layout in a loop. The
+        // achievable goal is adjacency *among the movable items*, ignoring anchors.
         let orderedItems = items
-            .filter { !$0.isSystemClone }
+            .filter { !$0.isSystemClone && !$0.tag.isLayoutAnchoredSystemItem }
             .sorted { lhs, rhs in
                 if lhs.bounds.midX == rhs.bounds.midX {
                     return lhs.uniqueIdentifier < rhs.uniqueIdentifier
@@ -3933,7 +3976,123 @@ extension MenuBarItemManager {
             }
         }
 
+        await applyMacOS27SectionItemOrder(
+            revealing: revealedSection,
+            hider: hider
+        )
+
         await cacheItemsRegardless(skipRecentMoveCheck: true)
+    }
+
+    /// Applies the user's persisted layout-bar order to a temporarily revealed
+    /// section. Boundary reconciliation only places items on the correct side of
+    /// each divider; macOS otherwise restores them in an arbitrary AX order.
+    private func applyMacOS27SectionItemOrder(
+        revealing revealedSection: MenuBarSection.Name,
+        hider: SimpleItemHider
+    ) async {
+        let sectionsToOrder: [MenuBarSection.Name] = switch revealedSection {
+        case .visible, .hidden:
+            [.hidden]
+        case .alwaysHidden:
+            [.hidden, .alwaysHidden]
+        }
+
+        for section in sectionsToOrder {
+            let desiredOrder = hider.sectionItemOrder[section] ?? []
+            guard desiredOrder.count > 1 else {
+                continue
+            }
+
+            // Build the order left-to-right: place each item immediately *right of*
+            // its nearest already-placed predecessor, anchoring on an item that is
+            // now in its final spot and will not be moved again this pass. The
+            // earlier "move item[i] left of item[i+1]" walk was unstable — moving a
+            // later item leftward jumped it past items already positioned, undoing
+            // pairs set earlier in the same pass and scrambling the order. Anchoring
+            // rightward on a fixed predecessor cannot disturb any earlier pair.
+            //
+            // Fetch the live item set once and reuse it; only a real move changes
+            // positions, so re-walk the (expensive, all-apps) AX tree only after
+            // one. Items already in place — the common case once converged — cost
+            // no AX walk at all.
+            var liveItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+
+            for index in 1 ..< desiredOrder.count {
+                guard !Task.isCancelled,
+                      hider.revealedSection == revealedSection
+                else {
+                    return
+                }
+
+                let liveByID = Dictionary(
+                    uniqueKeysWithValues: liveItems
+                        .filter { item in
+                            guard !item.isSystemClone, item.isMovable, !item.isControlItem else {
+                                return false
+                            }
+                            return hider.section(for: item) == section
+                        }
+                        .map { ($0.uniqueIdentifier, $0) }
+                )
+
+                guard let item = liveByID[desiredOrder[index]] else {
+                    continue
+                }
+
+                // Anchor on the nearest present predecessor in the desired order, so
+                // a concealed/missing item in the middle doesn't break the chain.
+                var anchor: MenuBarItem?
+                var predecessorIndex = index - 1
+                while predecessorIndex >= 0 {
+                    if let candidate = liveByID[desiredOrder[predecessorIndex]] {
+                        anchor = candidate
+                        break
+                    }
+                    predecessorIndex -= 1
+                }
+                guard let anchor else {
+                    continue
+                }
+
+                if Self.macOS27LiveOrderSatisfiesDestination(
+                    items: liveItems,
+                    item: item,
+                    destination: .rightOfItem(anchor)
+                ) {
+                    continue
+                }
+
+                do {
+                    // Non-concealable Apple system items are ordered best-effort:
+                    // they often resist the synthetic drag, so cap them at a single
+                    // attempt rather than the default budget — otherwise one pass
+                    // would hijack the cursor retrying each stuck system item.
+                    // Concealable third-party items keep the normal attempt budget.
+                    try await move(
+                        item: item,
+                        to: .rightOfItem(anchor),
+                        skipInputPause: true,
+                        watchdogTimeout: Self.layoutWatchdogTimeout,
+                        maxMoveAttempts: item.isNonConcealableSystemItem ? 1 : 8
+                    )
+                    MenuBarItemManager.diagLog.info(
+                        "Applied macOS 27 section order in \(section.logString) for \(item.logString)"
+                    )
+                } catch {
+                    MenuBarItemManager.diagLog.error(
+                        "Failed to apply macOS 27 section order for \(item.logString): \(error)"
+                    )
+                }
+
+                // A drag attempt can change the bar even when verification fails
+                // (MenuBarAgent may accept a partial displacement). Let it settle,
+                // then refresh once so the next pair is planned from current
+                // geometry. No-op pairs above keep sharing the existing snapshot.
+                try? await Task.sleep(for: .milliseconds(120))
+                liveItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            }
+        }
     }
 
     private static nonisolated func macOS27AXOrderDescription(_ items: [MenuBarItem]) -> String {
@@ -5882,6 +6041,38 @@ extension MenuBarItemManager {
         }
     }
 
+    /// macOS 27 profile/saved-order apply: writes section membership and order
+    /// through ``SimpleItemHider`` instead of the legacy bulk-move pipeline.
+    private func applyProfileLayoutMacOS27(
+        appState: AppState,
+        itemSectionMap: [String: String],
+        itemOrder: [String: [String]],
+        source: ApplySource
+    ) async {
+        guard let hider = appState.menuBarManager.simpleItemHider else {
+            MenuBarItemManager.diagLog.error("applyProfileLayout (macOS 27): missing SimpleItemHider")
+            return
+        }
+
+        hider.applyProfileLayout(
+            itemSectionMap: itemSectionMap,
+            itemOrder: itemOrder
+        )
+
+        savedSectionOrder = itemOrder
+        persistSavedSectionOrder()
+
+        let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+        MenuBarItemManager.diagLog.info(
+            "applyProfileLayout (macOS 27): applied \(hider.sectionAssignment.count) assignment(s)"
+        )
+
+        updateProfileSortedSnapshot(source: source, items: items)
+        persistProfileStateOnSuccess(source: source)
+        clearProfileState(source: source, items: items)
+        scheduleDeferredCacheRefresh()
+    }
+
     /// macOS 27 layout reset: sweeps every movable, hideable item (except the
     /// Thaw control item) into the Hidden section via the ``SimpleItemHider``
     /// assignment model — the 27 equivalent of the legacy control-item move
@@ -6697,6 +6888,19 @@ extension MenuBarItemManager {
         }
         guard !itemOrder.isEmpty else {
             MenuBarItemManager.diagLog.debug("applyProfileLayout: no item order, skipping")
+            return
+        }
+
+        // macOS 27: layout is assignment-backed, not position-based. The legacy
+        // bulk-move pipeline below cannot establish section membership on
+        // MenuBarAgent-hosted items.
+        if !Constants.supportsSectionHiding {
+            await applyProfileLayoutMacOS27(
+                appState: appState,
+                itemSectionMap: itemSectionMap,
+                itemOrder: itemOrder,
+                source: source
+            )
             return
         }
 
@@ -7575,7 +7779,17 @@ extension MenuBarItemManager {
         let hiddenMaxX = controlItems.hidden.bounds.maxX
         let ahBounds = controlItems.alwaysHidden?.bounds
 
-        for item in items where !item.isControlItem && item.canBeHidden && item.isMovable {
+        // Non-concealable Apple system items (Sound/Wi-Fi/Spotlight/Siri/…) report
+        // `canBeHidden` but can neither be bundle-concealed nor reliably dragged to
+        // the hidden side, so an assigned-hidden one is *perpetually* "in the wrong
+        // section". Including it here made divergence never clear, re-firing
+        // applyProfileLayout every cache cycle (the runaway loop that thrashed the
+        // divider and hijacked the cursor). They're managed best-effort elsewhere;
+        // exclude them from divergence so only achievable (third-party) drift
+        // triggers a re-apply.
+        for item in items where !item.isControlItem && item.canBeHidden && item.isMovable
+            && !item.isNonConcealableSystemItem
+        {
             let baseID = "\(item.tag.namespace):\(item.tag.title)"
             guard let expectedSection = savedSectionByBaseID[baseID] else {
                 continue
