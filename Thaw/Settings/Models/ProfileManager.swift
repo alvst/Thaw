@@ -597,9 +597,20 @@ final class ProfileManager: ObservableObject {
     /// (and UserDefaults), not the full app state, so the capture and re-arm
     /// paths can be exercised in tests without standing up an AppState.
     private func captureCurrentLayout(from itemManager: MenuBarItemManager) -> MenuBarLayoutSnapshot {
-        let savedSectionOrder = UserDefaults.standard.dictionary(
-            forKey: "MenuBarItemManager.savedSectionOrder"
-        ) as? [String: [String]] ?? [:]
+        let itemOrder = itemManager.computeSectionOrder(
+            from: itemManager.itemCache
+        )
+        // macOS 27 stores section membership in SimpleItemHider, not the legacy
+        // savedSectionOrder key. Mirror the curated cache snapshot so profiles
+        // and `defaults read` reflect the full visible/hidden layout.
+        let savedSectionOrder: [String: [String]]
+        if #available(macOS 27, *) {
+            savedSectionOrder = itemOrder
+        } else {
+            savedSectionOrder = UserDefaults.standard.dictionary(
+                forKey: "MenuBarItemManager.savedSectionOrder"
+            ) as? [String: [String]] ?? [:]
+        }
         let pinnedHiddenBundleIDs = UserDefaults.standard.array(
             forKey: "MenuBarItemManager.pinnedHiddenBundleIDs"
         ) as? [String] ?? []
@@ -627,9 +638,6 @@ final class ProfileManager: ObservableObject {
         // MenuBarItemManager.computeSectionOrder runs the same filter
         // and closed-app preservation, so the profile's itemOrder is
         // a curated snapshot consistent with savedSectionOrder.
-        let itemOrder = itemManager.computeSectionOrder(
-            from: itemManager.itemCache
-        )
         var itemSectionMap = [String: String]()
         for (sectionKey, uids) in itemOrder {
             for uid in uids {
