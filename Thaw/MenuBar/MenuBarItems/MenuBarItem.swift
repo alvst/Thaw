@@ -42,6 +42,13 @@ struct MenuBarItem: CustomStringConvertible {
         tag.canBeHidden && !isTransientControlCenterItem
     }
 
+    /// A Boolean value that indicates whether this item is owned by an Apple
+    /// system process that cannot be reliably concealed or reordered on macOS 27.
+    /// See ``MenuBarItemTag/isNonConcealableSystemItem``.
+    var isNonConcealableSystemItem: Bool {
+        tag.isNonConcealableSystemItem
+    }
+
     /// A Boolean value that indicates whether this item is a transient
     /// Control Center module (e.g. Live Activities) with a generic
     /// `Item-\d+` title. These are treated like screen recording indicators.
