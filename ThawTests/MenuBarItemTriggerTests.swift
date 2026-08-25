@@ -72,6 +72,54 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertTrue(TriggerCondition.charging.isSatisfied(state: state(charging: true)))
     }
 
+    func testBuiltInBatteryIsProtectedFromConditionalPlacement() {
+        let battery = MenuBarItemTag(
+            namespace: .controlCenter,
+            title: "Battery",
+            instanceIndex: 2
+        )
+        XCTAssertEqual(battery.triggerTargetPolicy, .systemVisibilityPreferenceSensitive)
+        XCTAssertEqual(
+            MenuBarItemTag.triggerTargetPolicy(for: "com.apple.controlcenter:Battery:2"),
+            .systemVisibilityPreferenceSensitive
+        )
+        XCTAssertEqual(
+            MenuBarItemTag.triggerTargetPolicy(for: "com.example.app:Battery"),
+            .supported
+        )
+        XCTAssertEqual(
+            MenuBarItemTag.triggerTargetPolicy(for: "com.apple.controlcenter:BatteryStatus"),
+            .supported
+        )
+
+        XCTAssertEqual(
+            MenuBarItemManager.triggerMovePreflight(for: battery, to: .visible),
+            .allowed
+        )
+        XCTAssertEqual(
+            MenuBarItemManager.triggerMovePreflight(for: battery, to: .hidden),
+            .protectedSystemItem
+        )
+        XCTAssertEqual(
+            MenuBarItemManager.triggerMovePreflight(for: battery, to: .alwaysHidden),
+            .protectedSystemItem
+        )
+
+        let observedBattery = TriggerItemOption(
+            id: battery.tagIdentifier,
+            name: "Battery",
+            baseIdentifier: battery.stableIdentifierBase
+        )
+        XCTAssertFalse(observedBattery.supportsConditionalPlacement)
+        XCTAssertTrue(
+            TriggerItemOption(
+                id: "com.example.app:Battery",
+                name: "Battery",
+                baseIdentifier: "com.example.app:Battery"
+            ).supportsConditionalPlacement
+        )
+    }
+
     // MARK: - Applications
 
     func testFrontmostApp() {
@@ -416,14 +464,14 @@ final class MenuBarItemTriggerTests: XCTestCase {
         manager.triggers = [
             MenuBarItemTrigger(
                 isEnabled: true,
-                itemIdentifier: "com.apple.controlcenter:Battery",
+                itemIdentifier: "com.example.Status",
                 condition: .batteryBelow(percentage: 69)
             ),
         ]
 
-        let owner = manager.controllingTrigger(forBaseIdentifier: "com.apple.controlcenter:Battery")
+        let owner = manager.controllingTrigger(forBaseIdentifier: "com.example.Status")
 
-        XCTAssertEqual(owner?.itemIdentifier, "com.apple.controlcenter:Battery")
+        XCTAssertEqual(owner?.itemIdentifier, "com.example.Status")
         XCTAssertNil(manager.controllingTrigger(forBaseIdentifier: "com.example.Other"))
         XCTAssertNil(manager.controllingTrigger(forBaseIdentifier: ""))
     }
@@ -436,12 +484,12 @@ final class MenuBarItemTriggerTests: XCTestCase {
         manager.triggers = [
             MenuBarItemTrigger(
                 isEnabled: false,
-                itemIdentifier: "com.apple.controlcenter:Battery",
+                itemIdentifier: "com.example.Status",
                 condition: .batteryBelow(percentage: 69)
             ),
         ]
 
-        XCTAssertNil(manager.controllingTrigger(forBaseIdentifier: "com.apple.controlcenter:Battery"))
+        XCTAssertNil(manager.controllingTrigger(forBaseIdentifier: "com.example.Status"))
     }
 
     /// A stored target carrying a stale instance suffix still resolves to the
@@ -451,12 +499,12 @@ final class MenuBarItemTriggerTests: XCTestCase {
         manager.triggers = [
             MenuBarItemTrigger(
                 isEnabled: true,
-                itemIdentifier: "com.apple.controlcenter:Battery:2",
+                itemIdentifier: "com.example.Status:2",
                 condition: .onBatteryPower
             ),
         ]
 
-        XCTAssertNotNil(manager.controllingTrigger(forBaseIdentifier: "com.apple.controlcenter:Battery"))
+        XCTAssertNotNil(manager.controllingTrigger(forBaseIdentifier: "com.example.Status"))
     }
 
     /// Two enabled triggers on one item resolve to the higher-priority one,
@@ -467,20 +515,69 @@ final class MenuBarItemTriggerTests: XCTestCase {
             MenuBarItemTrigger(
                 name: "First",
                 isEnabled: true,
-                itemIdentifier: "com.apple.controlcenter:Battery",
+                itemIdentifier: "com.example.Status",
                 condition: .onBatteryPower
             ),
             MenuBarItemTrigger(
                 name: "Second",
                 isEnabled: true,
-                itemIdentifier: "com.apple.controlcenter:Battery",
+                itemIdentifier: "com.example.Status",
                 condition: .onACPower
             ),
         ]
 
         XCTAssertEqual(
-            manager.controllingTrigger(forBaseIdentifier: "com.apple.controlcenter:Battery")?.displayName,
+            manager.controllingTrigger(forBaseIdentifier: "com.example.Status")?.displayName,
             "First"
+        )
+    }
+
+    func testProtectedBatteryTriggerDoesNotClaimLayoutOwnership() {
+        let manager = makeManager()
+        manager.triggers = [
+            MenuBarItemTrigger(
+                itemIdentifier: "com.apple.controlcenter:Battery:2",
+                itemBaseIdentifier: "com.apple.controlcenter:Battery",
+                condition: .onBatteryPower
+            ),
+        ]
+
+        XCTAssertFalse(manager.isControlledByTrigger(baseIdentifier: "com.apple.controlcenter:Battery"))
+        XCTAssertNil(manager.controllingTrigger(forBaseIdentifier: "com.apple.controlcenter:Battery"))
+        XCTAssertEqual(manager.runtimeStatus(for: manager.triggers[0]), .protectedSystemItem)
+    }
+
+    @MainActor
+    func testProtectedTriggerConditionSourcesAreNotPolled() {
+        let protected = MenuBarItemTrigger(
+            itemIdentifier: "com.apple.controlcenter:Battery",
+            itemBaseIdentifier: "com.apple.controlcenter:Battery",
+            condition: .scriptResult(path: "/protected-only", expectedOutput: "protected"),
+            additionalConditions: [
+                .imageChanged(itemIdentifier: "protected-image", referenceHash: nil),
+                .scriptResult(path: "/shared", expectedOutput: "protected"),
+                .imageChanged(itemIdentifier: "shared-image", referenceHash: nil),
+            ]
+        )
+        let supported = MenuBarItemTrigger(
+            itemIdentifier: "com.example.Status",
+            condition: .scriptResult(path: "/shared", expectedOutput: "supported"),
+            additionalConditions: [
+                .imageChanged(itemIdentifier: "shared-image", referenceHash: nil),
+            ]
+        )
+
+        XCTAssertEqual(
+            MenuBarItemTriggersManager.runnableScriptExpectedOutputs(
+                in: [protected, supported]
+            ),
+            ["/shared": ["supported"]]
+        )
+        XCTAssertEqual(
+            MenuBarItemTriggersManager.runnableImageObservationIdentifiers(
+                in: [protected, supported]
+            ),
+            ["shared-image"]
         )
     }
 
@@ -902,13 +999,12 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertNil(plan.actions[lower.id])
     }
 
-    /// Battery hides like any other target. An earlier revision exempted the
-    /// Control Center Battery control from the hide branch, on the theory
-    /// that concealing it would turn off the system's own Show in Menu Bar
-    /// setting; that does not happen, and the exemption made a trigger
-    /// silently ignore the "Otherwise hide in" section the user picked.
+    /// The built-in Battery item is governed by macOS's Show in Menu Bar
+    /// preference. A conditional off-screen drag can turn that preference off,
+    /// so the entire trigger is suspended before it claims ownership or plans
+    /// either branch.
     @MainActor
-    func testPriorityPlanHidesControlCenterBatteryWhenConditionClears() {
+    func testPriorityPlanProtectsControlCenterBatteryInBothBranches() {
         let manager = makeManager()
         let trigger = MenuBarItemTrigger(
             itemIdentifier: "com.apple.controlcenter:Battery",
@@ -924,13 +1020,8 @@ final class MenuBarItemTriggerTests: XCTestCase {
                 "com.apple.controlcenter:Battery": "com.apple.controlcenter:Battery",
             ]
         )
-        XCTAssertEqual(
-            hiddenPlan.actions[trigger.id],
-            MenuBarItemTriggersManager.TriggerPriorityAction(
-                reveal: false,
-                identifiers: ["com.apple.controlcenter:Battery"]
-            )
-        )
+        XCTAssertNil(hiddenPlan.actions[trigger.id])
+        XCTAssertTrue(hiddenPlan.protectedTriggerIDs.contains(trigger.id))
         XCTAssertFalse(hiddenPlan.unavailableTriggerIDs.contains(trigger.id))
 
         let revealPlan = manager.priorityPlan(
@@ -940,13 +1031,38 @@ final class MenuBarItemTriggerTests: XCTestCase {
                 "com.apple.controlcenter:Battery": "com.apple.controlcenter:Battery",
             ]
         )
-        XCTAssertEqual(
-            revealPlan.actions[trigger.id],
-            MenuBarItemTriggersManager.TriggerPriorityAction(
-                reveal: true,
-                identifiers: ["com.apple.controlcenter:Battery"]
-            )
+        XCTAssertNil(revealPlan.actions[trigger.id])
+        XCTAssertTrue(revealPlan.protectedTriggerIDs.contains(trigger.id))
+    }
+
+    @MainActor
+    func testPriorityPlanRejectsMultiItemTriggerContainingProtectedBattery() {
+        let manager = makeManager()
+        let trigger = MenuBarItemTrigger(
+            itemIdentifier: "com.example.Safe",
+            itemBaseIdentifier: "com.example.Safe",
+            additionalItems: [
+                TriggerTargetItem(
+                    identifier: "com.apple.controlcenter:Battery:1",
+                    displayName: "Battery",
+                    baseIdentifier: "com.apple.controlcenter:Battery"
+                ),
+            ],
+            condition: .onACPower
         )
+        manager.triggers = [trigger]
+
+        let plan = manager.priorityPlan(
+            for: state(onAC: true),
+            presentIdentifiers: ["com.example.Safe", "com.apple.controlcenter:Battery:1"],
+            presentIdentifierBases: [
+                "com.example.Safe": "com.example.Safe",
+                "com.apple.controlcenter:Battery:1": "com.apple.controlcenter:Battery",
+            ]
+        )
+
+        XCTAssertNil(plan.actions[trigger.id])
+        XCTAssertTrue(plan.protectedTriggerIDs.contains(trigger.id))
     }
 
     @MainActor
@@ -1214,13 +1330,8 @@ final class MenuBarItemTriggerTests: XCTestCase {
         )
 
         XCTAssertEqual(repaired.itemBaseIdentifier, "com.apple.controlcenter:Battery")
-        XCTAssertEqual(
-            plan.actions[repaired.id],
-            MenuBarItemTriggersManager.TriggerPriorityAction(
-                reveal: true,
-                identifiers: ["com.apple.controlcenter:Battery:1"]
-            )
-        )
+        XCTAssertNil(plan.actions[repaired.id])
+        XCTAssertTrue(plan.protectedTriggerIDs.contains(repaired.id))
         XCTAssertFalse(plan.unavailableTriggerIDs.contains(repaired.id))
     }
 
