@@ -127,12 +127,12 @@ extension MenuBarItemManager {
     ///
     /// Separated from event creation so the geometry and ordering are unit
     /// testable without a live menu bar. The caller is responsible for
-    /// pinning `start.y` and `end.y` to the menu bar's vertical midline: a
-    /// gesture that stays on one horizontal line inside the bar reads to
-    /// Control Center as a reorder, whereas a path that dips below the bar is
-    /// read as a *removal* — the gesture that orphaned a hosted item's scene
-    /// in the field (`Completing drag by removing dragged object from menu
-    /// bar`, `0 not configured to allow removal`).
+    /// pinning `start.y` and `end.y` to the bar's top edge (the item's home
+    /// row): a gesture that stays on one horizontal line inside the bar reads
+    /// to Control Center as a reorder, whereas a path that dips below the bar
+    /// is read as a *removal* — the gesture that orphaned a hosted item's
+    /// scene in the field (`Completing drag by removing dragged object from
+    /// menu bar`, `0 not configured to allow removal`).
     nonisolated enum MoveGesture {
         /// One synthetic event in a gesture: its move subtype and location.
         struct Step: Equatable {
@@ -799,7 +799,18 @@ extension MenuBarItemManager {
             return nil
         }
         // The press has to land on the item, so the item must be on screen.
-        let barY = itemBounds.midY
+        //
+        // Pin the whole gesture to the item's home row (the bar's top edge),
+        // not its vertical midline. A synthetic event at the midline (y≈16.5
+        // on a 33 pt bar) makes Control Center hold the item at origin y≈17 —
+        // half below the bar — which is the lifted state a drag-to-remove
+        // begins from ("Item responded to events with new origin: (864.0,
+        // 17.0)"). At the top edge the item stays in its row (origin y=0), an
+        // unambiguous horizontal reorder, matching the on-screen press
+        // coordinate that landed in the field logs ("pressing at (1332.0,0.0)
+        // on screen=true"). The mouse-down still lands on the item because
+        // the item's own window spans that edge.
+        let barY = itemBounds.minY
         let start = CGPoint(x: itemBounds.midX, y: barY)
         let itemIsOnScreen = NSScreen.screens.contains {
             CGDisplayBounds($0.displayID).contains(start)
@@ -831,48 +842,68 @@ extension MenuBarItemManager {
         startOrigin: CGPoint,
         timeout: Duration
     ) async throws -> CGPoint {
-        let dragSteps = steps.dropLast() // Everything up to and including the last drag.
         guard let releaseStep = steps.last, releaseStep.subtype == .mouseUp else {
             throw EventError.eventCreationFailure(item)
         }
-        for step in dragSteps {
-            guard let event = CGEvent.menuBarItemEvent(
+        let dragSteps = steps.dropLast() // Everything up to and including the last drag.
+
+        // Guarantees the moved item's drag is ended by exactly one release on
+        // the bar, even when a step fails mid-gesture. A drag left dangling is
+        // what let Control Center resolve a later event as a *removal* and
+        // orphan the hosted item (the vanish); a coherent gesture must never
+        // leave the button held. Stamped with the moved item, at the on-bar
+        // release point.
+        var released = false
+        func releaseOnBar() async {
+            guard !released else { return }
+            released = true
+            guard let release = CGEvent.menuBarItemEvent(
                 item: item,
                 source: source,
-                type: .move(step.subtype),
-                location: step.point
+                type: .move(.mouseUp),
+                location: releaseStep.point
             ) else {
-                throw EventError.eventCreationFailure(item)
+                return
             }
-            try await scrombleEvent(event, item: item, timeout: timeout)
-            if step.subtype == .mouseDragged {
-                // A human-cadence pause so Control Center's drag tracker
-                // follows the item between steps.
-                await eventSleep(for: .milliseconds(8))
+            // Double mouse up prevents invalid item state.
+            try? await scrombleEvent(release, item: item, timeout: timeout, repeating: 2)
+        }
+
+        var itemOrigin = startOrigin
+        do {
+            for step in dragSteps {
+                guard let event = CGEvent.menuBarItemEvent(
+                    item: item,
+                    source: source,
+                    type: .move(step.subtype),
+                    location: step.point
+                ) else {
+                    throw EventError.eventCreationFailure(item)
+                }
+                try await scrombleEvent(event, item: item, timeout: timeout)
+                if step.subtype == .mouseDragged {
+                    // A human-cadence pause so Control Center's drag tracker
+                    // follows the item between steps.
+                    await eventSleep(for: .milliseconds(8))
+                }
             }
+            // Confirm the item actually followed the drag off its start
+            // position; a drag that displaced nothing is a real failure,
+            // handled by the caller's fallback and retry like the teleport's.
+            itemOrigin = try await waitForMoveEventResponse(
+                from: item,
+                initialOrigin: startOrigin,
+                timeout: timeout
+            )
+            await releaseOnBar()
+        } catch {
+            // End the drag on the bar before propagating, so a failed gesture
+            // never leaves an active drag for a stray event to complete as a
+            // removal.
+            await releaseOnBar()
+            throw error
         }
-        // Confirm the item actually followed the drag off its start position;
-        // a drag that displaced nothing is a real failure, handled by the
-        // caller's fallback and retry exactly like the teleport's.
-        var itemOrigin = try await waitForMoveEventResponse(
-            from: item,
-            initialOrigin: startOrigin,
-            timeout: timeout
-        )
-        guard let release = CGEvent.menuBarItemEvent(
-            item: item,
-            source: source,
-            type: .move(releaseStep.subtype),
-            location: releaseStep.point
-        ) else {
-            throw EventError.eventCreationFailure(item)
-        }
-        try await scrombleEvent(
-            release,
-            item: item,
-            timeout: timeout,
-            repeating: 2 // Double mouse up prevents invalid item state.
-        )
+
         // Let the drop settle, then read where the item came to rest. Unlike
         // the teleport's post-release wait, this must not require an origin
         // *change*: a revert leaves the item back at its start, and demanding
