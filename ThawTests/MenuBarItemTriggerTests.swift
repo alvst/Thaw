@@ -790,6 +790,15 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertGreaterThan(ImageHashing.hammingDistance(mostlyBlack, mostlyWhite), ImageHashing.changeThreshold)
     }
 
+    func testExactHashIsDeterministicAndPixelSensitive() throws {
+        let first = makeImage(whiteColumns: 8)
+        let same = makeImage(whiteColumns: 8)
+        let changed = makeImage(whiteColumns: 9)
+
+        XCTAssertEqual(ImageHashing.exactHash(first), ImageHashing.exactHash(same))
+        XCTAssertNotEqual(ImageHashing.exactHash(first), ImageHashing.exactHash(changed))
+    }
+
     func testImageChangedCondition() {
         let id = "com.apple.controlcenter:Battery"
         let reference: UInt64 = 0x0000_0000_0000_0000
@@ -806,6 +815,40 @@ final class MenuBarItemTriggerTests: XCTestCase {
         // No reference captured -> never satisfied.
         let noRef = TriggerCondition.imageChanged(itemIdentifier: id, referenceHash: nil)
         XCTAssertFalse(noRef.isSatisfied(state: changed))
+    }
+
+    func testExactAndFuzzyImageComparisonDifferOnSmallChanges() {
+        let id = "com.example:Status"
+        var current = state()
+        current.imageHashes = [id: 1] // One perceptual bit differs.
+        current.exactImageHashes = [id: 101]
+
+        let fuzzy = TriggerCondition.imageChanged(
+            itemIdentifier: id,
+            referenceHash: 0,
+            referenceExactHash: 100,
+            comparisonMode: .fuzzy
+        )
+        let exact = TriggerCondition.imageChanged(
+            itemIdentifier: id,
+            referenceHash: 0,
+            referenceExactHash: 100,
+            comparisonMode: .exact
+        )
+
+        XCTAssertFalse(fuzzy.isSatisfied(state: current))
+        XCTAssertTrue(exact.isSatisfied(state: current))
+    }
+
+    func testExactComparisonRequiresAnExactReference() {
+        let condition = TriggerCondition.imageChanged(
+            itemIdentifier: "item",
+            referenceHash: 0,
+            comparisonMode: .exact
+        )
+        var current = state()
+        current.exactImageHashes = ["item": 1]
+        XCTAssertFalse(condition.isSatisfied(state: current))
     }
 
     func testImageChangedCodableRoundTrip() throws {
@@ -825,6 +868,54 @@ final class MenuBarItemTriggerTests: XCTestCase {
         let decoded = try JSONDecoder().decode(TriggerCondition.self, from: data)
 
         XCTAssertEqual(decoded, condition)
+    }
+
+    func testImageComparisonSettingsCodableRoundTrip() throws {
+        let condition = TriggerCondition.imageChanged(
+            itemIdentifier: "item",
+            referenceHash: 7,
+            referenceExactHash: 11,
+            comparisonMode: .exact,
+            referenceImageData: Data([1, 2, 3])
+        )
+
+        let data = try JSONEncoder().encode(condition)
+        XCTAssertEqual(try JSONDecoder().decode(TriggerCondition.self, from: data), condition)
+    }
+
+    func testLegacyImageComparisonDefaultsToFuzzyWithoutPreview() throws {
+        let data = Data(#"{"imageChanged":{"itemIdentifier":"item","referenceHash":7}}"#.utf8)
+        let decoded = try JSONDecoder().decode(TriggerCondition.self, from: data)
+
+        XCTAssertEqual(decoded.imageValue?.comparisonMode, .fuzzy)
+        XCTAssertEqual(decoded.imageValue?.referenceHash, 7)
+        XCTAssertNil(decoded.imageValue?.referenceExactHash)
+        XCTAssertNil(decoded.imageValue?.referenceImageData)
+    }
+
+    func testCapturedReferenceAndModeArePreserved() {
+        let reference = ImageComparisonReference(
+            perceptualHash: 7,
+            exactHash: 11,
+            imageData: Data([1, 2, 3])
+        )
+        let condition = TriggerCondition.imageChanged(
+            itemIdentifier: "item",
+            referenceHash: nil,
+            comparisonMode: .exact
+        )
+        let captured = condition.withImageReference(reference)
+
+        XCTAssertEqual(captured.imageValue?.comparisonMode, .exact)
+        XCTAssertEqual(captured.imageValue?.referenceHash, 7)
+        XCTAssertEqual(captured.imageValue?.referenceExactHash, 11)
+        XCTAssertEqual(captured.imageValue?.referenceImageData, Data([1, 2, 3]))
+
+        let changedItem = captured.withImageItem("other")
+        XCTAssertEqual(changedItem.imageValue?.comparisonMode, .exact)
+        XCTAssertNil(changedItem.imageValue?.referenceHash)
+        XCTAssertNil(changedItem.imageValue?.referenceExactHash)
+        XCTAssertNil(changedItem.imageValue?.referenceImageData)
     }
 
     // MARK: - Kind / editor mapping

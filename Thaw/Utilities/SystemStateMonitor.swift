@@ -107,6 +107,10 @@ struct SystemState: Equatable {
     /// conditions, keyed by item tag identifier. Populated by the manager.
     var imageHashes: [String: UInt64]
 
+    /// Exact pixel hashes of watched items, populated alongside
+    /// ``imageHashes`` for exact image-comparison conditions.
+    var exactImageHashes: [String: UInt64]
+
     init(
         power: PowerState = PowerState(batteryPercentage: nil, isOnACPower: true, isCharging: false),
         frontmostAppBundleID: String? = nil,
@@ -127,7 +131,8 @@ struct SystemState: Equatable {
         isCameraInUse: Bool = false,
         isMicrophoneInUse: Bool = false,
         scriptOutcomes: [String: ScriptOutcome] = [:],
-        imageHashes: [String: UInt64] = [:]
+        imageHashes: [String: UInt64] = [:],
+        exactImageHashes: [String: UInt64] = [:]
     ) {
         self.power = power
         self.frontmostAppBundleID = frontmostAppBundleID
@@ -149,6 +154,7 @@ struct SystemState: Equatable {
         self.isMicrophoneInUse = isMicrophoneInUse
         self.scriptOutcomes = scriptOutcomes
         self.imageHashes = imageHashes
+        self.exactImageHashes = exactImageHashes
     }
 }
 
