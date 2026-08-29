@@ -58,6 +58,7 @@ $(SRCROOT)/Thaw/MenuBar/LayoutBar/LayoutBarItemView.swift
 $(SRCROOT)/Thaw/MenuBar/LayoutBar/LayoutBarNewItemsBadgeView.swift
 $(SRCROOT)/Thaw/MenuBar/LayoutBar/LayoutBarPaddingView.swift
 $(SRCROOT)/Thaw/MenuBar/LayoutBar/LayoutBarScrollView.swift
+$(SRCROOT)/Thaw/MenuBar/LayoutBar/MoveFailureDiagnosticReport.swift
 $(SRCROOT)/Thaw/MenuBar/LayoutBar/NotchIndicatorOverlay.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/AXIdentityCatalog.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/AXItemActivator.swift
@@ -176,6 +177,7 @@ $(SRCROOT)/Thaw/Utilities/ConcurrencyHelpers.swift
 $(SRCROOT)/Thaw/Utilities/ConflictingAppDetector.swift
 $(SRCROOT)/Thaw/Utilities/Constants.swift
 $(SRCROOT)/Thaw/Utilities/Defaults.swift
+$(SRCROOT)/Thaw/Utilities/DiagnosticRedactor.swift
 $(SRCROOT)/Thaw/Utilities/EnergyModeMonitor.swift
 $(SRCROOT)/Thaw/Utilities/Extensions.swift
 $(SRCROOT)/Thaw/Utilities/Helpers.swift

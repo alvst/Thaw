@@ -418,17 +418,48 @@ final class LayoutBarPaddingView: NSView {
                             ? String(localized: "Couldn't move \(item.displayName) to the always-hidden section.")
                             : String(localized: "Couldn't move \(item.displayName) to the hidden section.")
                         alert.informativeText = String(localized: "The item was left in the visible section so it isn't stuck offscreen. Try dragging it again in a moment.")
-                        alert.runModal()
+                        let report = await MoveFailureDiagnosticReport.generate(
+                            for: .init(
+                                item: item,
+                                destination: destination,
+                                expectedSection: container.section,
+                                error: error,
+                                note: "The item was stuck at x=-1; a rescue to the visible section and one retry of the move also failed."
+                            ),
+                            appState: appState
+                        )
+                        report.run(alert)
                     }
                 case .alertControlItemsMissing:
                     let alert = NSAlert()
                     alert.alertStyle = .warning
                     alert.messageText = String(localized: "Couldn't move the item right now.")
                     alert.informativeText = String(localized: "\(Constants.displayName) can't locate its hidden-section divider right now. It is attempting recovery in the background — try again in a few seconds.")
-                    alert.runModal()
+                    let report = await MoveFailureDiagnosticReport.generate(
+                        for: .init(
+                            item: item,
+                            destination: destination,
+                            expectedSection: container.section,
+                            error: error,
+                            note: "The hidden-section divider could not be located; recovery was started in the background."
+                        ),
+                        appState: appState
+                    )
+                    report.run(alert)
                 case .alertGeneric:
-                    let alert = NSAlert(error: error)
-                    alert.runModal()
+                    // Generated before the alert shows so the "Save Diagnostic
+                    // Report…" button has the bar as it was at the failure,
+                    // not as it settles while the alert is up.
+                    let report = await MoveFailureDiagnosticReport.generate(
+                        for: .init(
+                            item: item,
+                            destination: destination,
+                            expectedSection: container.section,
+                            error: error
+                        ),
+                        appState: appState
+                    )
+                    report.run(NSAlert(error: error))
                 }
             }
             if !revealedSections.isEmpty {
