@@ -90,6 +90,44 @@ extension MenuBarItemManager {
         CGPoint(x: notchFrameAppKit.midX, y: targetPointCoreGraphics.y)
     }
 
+    /// What one round of move events observed, beyond the timeout budget the
+    /// next round inherits.
+    nonisolated struct MoveEventsOutcome {
+        /// The timeout to carry into the next attempt.
+        var timeout: Duration
+        /// Whether the press was delivered at an on-screen point with the
+        /// cursor warped there, rather than redirected into the notch.
+        var pressedOnScreen: Bool
+        /// Whether the item ended exactly where it started: it followed the
+        /// press and the release put it straight back.
+        var revertedToStart: Bool
+    }
+
+    /// A press point inside Thaw's hidden divider where the divider is on
+    /// screen: one point in from its right edge, on the menu bar's top edge.
+    ///
+    /// Every press delivered on screen with the cursor warped to it landed in
+    /// the field logs, including presses inside Thaw's own windows; the
+    /// presses that failed in bursts were the ones redirected into the notch
+    /// for an off-screen destination, where Control Center moves the item
+    /// on the press and then puts it straight back on the release. The
+    /// collapsed hidden divider always reaches on screen — its right edge
+    /// borders the visible section — so it offers an on-screen press point
+    /// for any off-screen destination, in a window Thaw owns.
+    ///
+    /// Returns `nil` when no point of the divider is on screen, or when it has
+    /// no width there (the section is shown and the divider is a hairline).
+    static nonisolated func hiddenDividerPressPoint(
+        dividerBounds: CGRect,
+        displayBounds: CGRect
+    ) -> CGPoint? {
+        let x = min(dividerBounds.maxX, displayBounds.maxX) - 1
+        guard x > displayBounds.minX, x >= dividerBounds.minX else {
+            return nil
+        }
+        return CGPoint(x: x, y: dividerBounds.minY)
+    }
+
     /// Polls `read` until two consecutive readings agree, or `maxPolls`
     /// readings have been taken. Returns the last reading and whether the
     /// one before it confirmed it.
@@ -297,6 +335,19 @@ extension MenuBarItemManager {
         clickOperationTimeouts = clickOperationTimeouts.filter { validTags.contains($0.key) }
     }
 
+    /// The on-screen press point inside the hidden divider on the given
+    /// display, from a fresh enumeration. See `hiddenDividerPressPoint`.
+    private func hiddenDividerPressPoint(on displayID: CGDirectDisplayID) async -> CGPoint? {
+        let items = await MenuBarItem.getMenuBarItems(on: displayID, option: .activeSpace, resolveSourcePID: false)
+        guard let divider = items.first(where: { $0.tag == .hiddenControlItem }) else {
+            return nil
+        }
+        return Self.hiddenDividerPressPoint(
+            dividerBounds: divider.bounds,
+            displayBounds: CGDisplayBounds(displayID)
+        )
+    }
+
     /// Returns the target points for creating the events needed to
     /// move a menu bar item to the given destination.
     private nonisolated func getTargetPoints(
@@ -442,8 +493,9 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         destination: MoveDestination,
         on displayID: CGDirectDisplayID,
-        warpCursorAfter: Bool = true
-    ) async throws -> Duration {
+        warpCursorAfter: Bool = true,
+        pressPointOverride: CGPoint? = nil
+    ) async throws -> MoveEventsOutcome {
         var acquiredSemaphore = false
         do {
             try await eventSemaphore.wait(timeout: .milliseconds(3500))
@@ -500,7 +552,11 @@ extension MenuBarItemManager {
         // second teleported it. A drag-gesture geometry was trialled behind
         // a setting to remove that warm-up and did not fix it, so it was
         // withdrawn; the warm-up attempt remains an open problem.
-        let pressPoint = targetPoints.start
+        // A caller that saw the notch press revert supplies an on-screen
+        // point instead; it is on screen, so the warp and the 20 ms tracking
+        // pause below run for it exactly as for an on-screen destination,
+        // and the notch redirect is skipped.
+        let pressPoint = pressPointOverride ?? targetPoints.start
 
         // Capture mouse location only when this call owns the cursor warp.
         // When called from move(), the outer move() handles the single warp
@@ -643,7 +699,17 @@ extension MenuBarItemManager {
             updateMoveOperationTimeout(timeout, for: item)
             throw error
         }
-        return timeout
+        let revertedToStart = itemOrigin == itemBounds.origin
+        if revertedToStart {
+            MenuBarItemManager.diagLog.debug(
+                "Move events left \(item.logString) at its starting origin (\(itemOrigin.x),\(itemOrigin.y)) after pressing at (\(pressPoint.x),\(pressPoint.y)) on screen=\(warpIsOnScreen)"
+            )
+        }
+        return MoveEventsOutcome(
+            timeout: timeout,
+            pressedOnScreen: warpIsOnScreen,
+            revertedToStart: revertedToStart
+        )
     }
 
     /// Checks if a menu bar item is in a "blocked" state (positioned at x=-1 off-screen).
@@ -938,6 +1004,10 @@ extension MenuBarItemManager {
         // target externally; ordinary items skip this gate.
         var anyMoveEventsSucceeded = false
 
+        // Set once a notch press has visibly reverted: the remaining attempts
+        // press on screen instead. See `hiddenDividerPressPoint`.
+        var pressPointAfterRevert: CGPoint?
+
         // Baseline for the stale-plan check in the retry path. The destination
         // was chosen against the bar as it looked when this move was planned;
         // if the target itself travels a long way while we are dragging, the
@@ -985,12 +1055,14 @@ extension MenuBarItemManager {
                     attemptMouseLocation = try getMouseLocation()
                     MouseHelpers.hideCursor(watchdogTimeout: watchdogTimeout ?? .seconds(2))
                 }
-                let attemptTimeout = try await postMoveEvents(
+                let outcome = try await postMoveEvents(
                     item: item,
                     destination: destination,
                     on: resolvedDisplayID,
-                    warpCursorAfter: false // move() owns the single warp in its defer
+                    warpCursorAfter: false, // move() owns the single warp in its defer
+                    pressPointOverride: pressPointAfterRevert
                 )
+                let attemptTimeout = outcome.timeout
                 // postMoveEvents only returns without throwing when both
                 // waitForMoveEventResponse calls observed origin changes,
                 // i.e. our drag actually displaced the item.
@@ -1004,6 +1076,26 @@ extension MenuBarItemManager {
                     for: destination,
                     on: resolvedDisplayID
                 )
+                // A notch press that the release put straight back is the
+                // signature of Control Center refusing the drop; repeating it
+                // repeats the refusal. Switch the remaining attempts to an
+                // on-screen press, the variant that has never failed.
+                if !landedOnDestination,
+                   outcome.revertedToStart,
+                   !outcome.pressedOnScreen,
+                   pressPointAfterRevert == nil
+                {
+                    pressPointAfterRevert = await hiddenDividerPressPoint(on: resolvedDisplayID)
+                    if let pressPointAfterRevert {
+                        MenuBarItemManager.diagLog.info(
+                            "Attempt \(n): \(item.logString) returned to its starting origin after the notch press; remaining attempts press on screen at (\(pressPointAfterRevert.x),\(pressPointAfterRevert.y)) inside the hidden divider"
+                        )
+                    } else {
+                        MenuBarItemManager.diagLog.debug(
+                            "Attempt \(n): \(item.logString) returned to its starting origin after the notch press, and no on-screen press point is available"
+                        )
+                    }
+                }
                 // `postMoveEvents` only observes displacement. Let this
                 // single post-event landing check decide whether the next
                 // attempt earns a shorter budget or keeps it unchanged;

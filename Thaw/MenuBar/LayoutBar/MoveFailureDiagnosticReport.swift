@@ -100,7 +100,7 @@ nonisolated struct MoveFailureDiagnosticReport {
         writeFailure(failure, appState: appState, to: &writer)
         writeDisplays(to: &writer)
         writeSettings(appState: appState, to: &writer)
-        writeCachedMenuBar(appState: appState, to: &writer)
+        writeCachedMenuBar(appState: appState, liveItems: liveItems, to: &writer)
         writeLiveMenuBar(liveItems, to: &writer)
         writeSavedLayout(appState: appState, to: &writer)
         writeTriggers(appState: appState, to: &writer)
@@ -276,6 +276,7 @@ private extension MoveFailureDiagnosticReport {
             "  movability=\(movability) provisionalIdentity=\(item.hasProvisionalIdentity) "
                 + "systemClone=\(item.isSystemClone) canBeHidden=\(item.canBeHidden) controlItem=\(item.isControlItem)",
             "  ownerUnresponsive=\(Bridging.isProcessUnresponsive(item.ownerPID)) "
+                + "sourceUnresponsive=\(item.sourcePID.map { String(Bridging.isProcessUnresponsive($0)) } ?? "n/a") "
                 + "ledgerUnresponsive=\(manager.failureLedger.isUnresponsive(item)) "
                 + "ledgerBackoff=\(manager.failureLedger.isUnderBackoff(for: item)) moveTimeout=\(timeout)",
         ]
@@ -307,7 +308,7 @@ private extension MoveFailureDiagnosticReport {
     }
 
     @MainActor
-    static func writeCachedMenuBar(appState: AppState, to writer: inout Writer) {
+    static func writeCachedMenuBar(appState: AppState, liveItems: [MenuBarItem], to writer: inout Writer) {
         let manager = appState.itemManager
         let cache = manager.itemCache
         writer.heading("Menu bar (cached sections, left to right)")
@@ -319,16 +320,22 @@ private extension MoveFailureDiagnosticReport {
                 writer.line("  \(compactDescription(of: item))")
             }
         }
-        for name in [MenuBarSection.Name.hidden, .alwaysHidden] {
-            guard
-                let window = appState.menuBarManager.controlItem(withName: name)?.window,
-                let windowID = CGWindowID(exactly: window.windowNumber)
-            else {
-                writer.line("\(name.logString) divider: no window")
+        // The control item's own window reference is often nil; the divider
+        // is still enumerable as a menu bar item by its tag.
+        let dividers: [(name: MenuBarSection.Name, tag: MenuBarItemTag)] = [
+            (.hidden, .hiddenControlItem),
+            (.alwaysHidden, .alwaysHiddenControlItem),
+        ]
+        for divider in dividers {
+            let windowID = appState.menuBarManager.controlItem(withName: divider.name)?.window
+                .flatMap { CGWindowID(exactly: $0.windowNumber) }
+                ?? liveItems.first { $0.tag == divider.tag }?.windowID
+            guard let windowID else {
+                writer.line("\(divider.name.logString) divider: not found")
                 continue
             }
             let bounds = Bridging.getWindowBounds(for: windowID).map(format) ?? "unknown"
-            writer.line("\(name.logString) divider: windowID=\(windowID) bounds=\(bounds)")
+            writer.line("\(divider.name.logString) divider: windowID=\(windowID) bounds=\(bounds)")
         }
         writer.line("Trigger-controlled identifiers: \(manager.triggerControlledItemIdentifiers.sorted())")
         writer.line("Pending trigger restoration: \(manager.triggerLayoutRestorationItemIdentifiers.sorted())")
