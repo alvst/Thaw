@@ -62,6 +62,12 @@ extension MenuBarItemManager {
         /// The condition which requested this move changed while the move was
         /// waiting or retrying. The obsolete drag must stop immediately.
         case moveSuperseded(MenuBarItem)
+        /// Every release put the item straight back at its starting origin:
+        /// Control Center restored the item's autosaved slot because its
+        /// source app never registered the drop. Observed to hold for
+        /// minutes at a time for one item — every press variant reverted the
+        /// same way — and then clear by itself, so retrying only costs time.
+        case dropReverted(MenuBarItem)
 
         var description: String {
             switch self {
@@ -93,6 +99,8 @@ extension MenuBarItemManager {
                 "\(Self.self).inputPauseTimedOut(item: \(item.tag))"
             case let .moveSuperseded(item):
                 "\(Self.self).moveSuperseded(item: \(item.tag))"
+            case let .dropReverted(item):
+                "\(Self.self).dropReverted(item: \(item.tag))"
             }
         }
 
@@ -126,14 +134,20 @@ extension MenuBarItemManager {
                 "Input did not pause before moving \"\(item.displayName)\""
             case let .moveSuperseded(item):
                 "The requested move for \"\(item.displayName)\" is no longer current"
+            case let .dropReverted(item):
+                "\"\(item.displayName)\" could not be kept in its new position"
             }
         }
 
         var recoverySuggestion: String? {
-            if case .itemNotMovable = self {
-                return nil
+            switch self {
+            case .itemNotMovable:
+                nil
+            case let .dropReverted(item):
+                "macOS put \"\(item.displayName)\" back after every attempt. This usually clears on its own within a few minutes; clicking the item, or quitting and reopening its app, resets it sooner. If it keeps happening, please file a bug report."
+            default:
+                "Please try again. If the error persists, please file a bug report."
             }
-            return "Please try again. If the error persists, please file a bug report."
         }
 
         /// How the failure ledger should file this error.
@@ -154,7 +168,7 @@ extension MenuBarItemManager {
                 true
             case .cannotComplete, .invalidEventSource, .missingMouseLocation, .eventCreationFailure,
                  .itemNotMovable, .missingItemBounds, .menuTrackingActive, .eventWindowMismatch,
-                 .staleDestination, .inputPauseTimedOut, .moveSuperseded:
+                 .staleDestination, .inputPauseTimedOut, .moveSuperseded, .dropReverted:
                 false
             }
         }

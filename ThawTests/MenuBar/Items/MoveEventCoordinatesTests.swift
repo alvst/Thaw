@@ -177,32 +177,4 @@ struct MoveEventCoordinatesTests {
         #expect(point == CGPoint(x: notchFrameAppKit.midX, y: targetPointCoreGraphics.y))
         #expect(point.y != notchFrameAppKit.midY)
     }
-
-    /// After a notch press reverts, the retry presses one point inside the
-    /// hidden divider's on-screen end. A collapsed divider reaches on screen
-    /// from far off the left edge; one that runs past the display's right
-    /// edge is clamped; one entirely off screen, or a hairline, offers no
-    /// point at all.
-    @Test("The on-screen retry press point sits inside the hidden divider's visible end")
-    func hiddenDividerPressPointSitsInsideTheVisibleEnd() {
-        let displayBounds = CGRect(x: 0, y: 0, width: 1728, height: 1117)
-
-        let collapsed = CGRect(x: -3689, y: 0, width: 5016, height: 33)
-        #expect(
-            MenuBarItemManager.hiddenDividerPressPoint(dividerBounds: collapsed, displayBounds: displayBounds)
-                == CGPoint(x: 1326, y: 0)
-        )
-
-        let pastTheRightEdge = CGRect(x: -3689, y: 0, width: 5600, height: 33)
-        #expect(
-            MenuBarItemManager.hiddenDividerPressPoint(dividerBounds: pastTheRightEdge, displayBounds: displayBounds)
-                == CGPoint(x: 1727, y: 0)
-        )
-
-        let offscreen = CGRect(x: -8747, y: 0, width: 5016, height: 33)
-        #expect(MenuBarItemManager.hiddenDividerPressPoint(dividerBounds: offscreen, displayBounds: displayBounds) == nil)
-
-        let hairline = CGRect(x: 1465, y: 0, width: 0, height: 33)
-        #expect(MenuBarItemManager.hiddenDividerPressPoint(dividerBounds: hairline, displayBounds: displayBounds) == nil)
-    }
 }

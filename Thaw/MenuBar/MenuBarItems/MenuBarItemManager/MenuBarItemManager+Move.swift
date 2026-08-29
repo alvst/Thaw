@@ -95,38 +95,31 @@ extension MenuBarItemManager {
     nonisolated struct MoveEventsOutcome {
         /// The timeout to carry into the next attempt.
         var timeout: Duration
-        /// Whether the press was delivered at an on-screen point with the
-        /// cursor warped there, rather than redirected into the notch.
-        var pressedOnScreen: Bool
         /// Whether the item ended exactly where it started: it followed the
         /// press and the release put it straight back.
         var revertedToStart: Bool
     }
 
-    /// A press point inside Thaw's hidden divider where the divider is on
-    /// screen: one point in from its right edge, on the menu bar's top edge.
+    /// Serializes moves app-wide.
     ///
-    /// Every press delivered on screen with the cursor warped to it landed in
-    /// the field logs, including presses inside Thaw's own windows; the
-    /// presses that failed in bursts were the ones redirected into the notch
-    /// for an off-screen destination, where Control Center moves the item
-    /// on the press and then puts it straight back on the release. The
-    /// collapsed hidden divider always reaches on screen — its right edge
-    /// borders the visible section — so it offers an on-screen press point
-    /// for any off-screen destination, in a window Thaw owns.
-    ///
-    /// Returns `nil` when no point of the divider is on screen, or when it has
-    /// no width there (the section is shown and the divider is a hairline).
-    static nonisolated func hiddenDividerPressPoint(
-        dividerBounds: CGRect,
-        displayBounds: CGRect
-    ) -> CGPoint? {
-        let x = min(dividerBounds.maxX, displayBounds.maxX) - 1
-        guard x > displayBounds.minX, x >= dividerBounds.minX else {
-            return nil
-        }
-        return CGPoint(x: x, y: dividerBounds.minY)
-    }
+    /// Moves reach `move(item:to:)` from the layout editor, the triggers, the
+    /// layout apply and the temporary-show paths, each with its own retry
+    /// loop. Two of them for the same item — a trigger hide and a drag in
+    /// the layout editor 130 ms apart in the field log — otherwise interleave
+    /// attempt by attempt, each undoing the other's press, until both give
+    /// up. Only the event posting was serialized before; the loops around it
+    /// were not.
+    private static let moveGate = SimpleSemaphore(value: 1)
+
+    /// Set for the task that holds ``moveGate``, so a move that starts a move
+    /// of its own (the blocked-item rescue after a landing) passes straight
+    /// through instead of waiting for itself.
+    @TaskLocal private static var holdsMoveGate = false
+
+    /// How long a move waits for the one in progress. Longer than a full
+    /// attempt budget with its input pause and menu wait, so a caller only
+    /// gives up when a move ahead of it is genuinely stuck.
+    private static let moveGateTimeout: Duration = .seconds(15)
 
     /// Polls `read` until two consecutive readings agree, or `maxPolls`
     /// readings have been taken. Returns the last reading and whether the
@@ -335,19 +328,6 @@ extension MenuBarItemManager {
         clickOperationTimeouts = clickOperationTimeouts.filter { validTags.contains($0.key) }
     }
 
-    /// The on-screen press point inside the hidden divider on the given
-    /// display, from a fresh enumeration. See `hiddenDividerPressPoint`.
-    private func hiddenDividerPressPoint(on displayID: CGDirectDisplayID) async -> CGPoint? {
-        let items = await MenuBarItem.getMenuBarItems(on: displayID, option: .activeSpace, resolveSourcePID: false)
-        guard let divider = items.first(where: { $0.tag == .hiddenControlItem }) else {
-            return nil
-        }
-        return Self.hiddenDividerPressPoint(
-            dividerBounds: divider.bounds,
-            displayBounds: CGDisplayBounds(displayID)
-        )
-    }
-
     /// Returns the target points for creating the events needed to
     /// move a menu bar item to the given destination.
     private nonisolated func getTargetPoints(
@@ -493,8 +473,7 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         destination: MoveDestination,
         on displayID: CGDirectDisplayID,
-        warpCursorAfter: Bool = true,
-        pressPointOverride: CGPoint? = nil
+        warpCursorAfter: Bool = true
     ) async throws -> MoveEventsOutcome {
         var acquiredSemaphore = false
         do {
@@ -552,11 +531,7 @@ extension MenuBarItemManager {
         // second teleported it. A drag-gesture geometry was trialled behind
         // a setting to remove that warm-up and did not fix it, so it was
         // withdrawn; the warm-up attempt remains an open problem.
-        // A caller that saw the notch press revert supplies an on-screen
-        // point instead; it is on screen, so the warp and the 20 ms tracking
-        // pause below run for it exactly as for an on-screen destination,
-        // and the notch redirect is skipped.
-        let pressPoint = pressPointOverride ?? targetPoints.start
+        let pressPoint = targetPoints.start
 
         // Capture mouse location only when this call owns the cursor warp.
         // When called from move(), the outer move() handles the single warp
@@ -702,14 +677,10 @@ extension MenuBarItemManager {
         let revertedToStart = itemOrigin == itemBounds.origin
         if revertedToStart {
             MenuBarItemManager.diagLog.debug(
-                "Move events left \(item.logString) at its starting origin (\(itemOrigin.x),\(itemOrigin.y)) after pressing at (\(pressPoint.x),\(pressPoint.y)) on screen=\(warpIsOnScreen)"
+                "Move events left \(item.logString) at its starting origin (\(itemOrigin.x),\(itemOrigin.y)) after pressing at (\(mouseDown.location.x),\(mouseDown.location.y))"
             )
         }
-        return MoveEventsOutcome(
-            timeout: timeout,
-            pressedOnScreen: warpIsOnScreen,
-            revertedToStart: revertedToStart
-        )
+        return MoveEventsOutcome(timeout: timeout, revertedToStart: revertedToStart)
     }
 
     /// Checks if a menu bar item is in a "blocked" state (positioned at x=-1 off-screen).
@@ -864,6 +835,42 @@ extension MenuBarItemManager {
         hideCursorAcrossAttempts: Bool = true,
         shouldProceed: (@MainActor () -> Bool)? = nil
     ) async throws {
+        // One move at a time, app-wide. See `moveGate`.
+        if !Self.holdsMoveGate {
+            let waitStartedAt = ContinuousClock.now
+            do {
+                try await Self.moveGate.wait(timeout: Self.moveGateTimeout)
+            } catch is SimpleSemaphore.TimeoutError {
+                MenuBarItemManager.diagLog.error(
+                    "move: another move has held the bar for \(Self.moveGateTimeout); giving up on \(item.logString)"
+                )
+                throw EventError.cannotComplete
+            }
+            defer {
+                Task.detached { await Self.moveGate.signal() }
+            }
+            let waited = ContinuousClock.now - waitStartedAt
+            if waited > .milliseconds(100) {
+                MenuBarItemManager.diagLog.debug(
+                    "move: waited \(Int(waited.milliseconds)) ms for another move to finish before moving \(item.logString)"
+                )
+            }
+            return try await Self.$holdsMoveGate.withValue(true) {
+                try await move(
+                    item: item,
+                    to: destination,
+                    on: displayID,
+                    skipInputPause: skipInputPause,
+                    requiredInputPause: requiredInputPause,
+                    inputPauseTimeout: inputPauseTimeout,
+                    watchdogTimeout: watchdogTimeout,
+                    maxMoveAttempts: maxMoveAttempts,
+                    hideCursorAcrossAttempts: hideCursorAcrossAttempts,
+                    shouldProceed: shouldProceed
+                )
+            }
+        }
+
         // System clone windows are transient WindowServer duplicates that
         // must never be moved. Refuse here as a final safety net so no
         // planning path can drag a phantom and displace real items. The
@@ -1004,9 +1011,9 @@ extension MenuBarItemManager {
         // target externally; ordinary items skip this gate.
         var anyMoveEventsSucceeded = false
 
-        // Set once a notch press has visibly reverted: the remaining attempts
-        // press on screen instead. See `hiddenDividerPressPoint`.
-        var pressPointAfterRevert: CGPoint?
+        // Consecutive attempts whose release put the item straight back at
+        // its starting origin. See `EventError.dropReverted`.
+        var revertedAttempts = 0
 
         // Baseline for the stale-plan check in the retry path. The destination
         // was chosen against the bar as it looked when this move was planned;
@@ -1059,8 +1066,7 @@ extension MenuBarItemManager {
                     item: item,
                     destination: destination,
                     on: resolvedDisplayID,
-                    warpCursorAfter: false, // move() owns the single warp in its defer
-                    pressPointOverride: pressPointAfterRevert
+                    warpCursorAfter: false // move() owns the single warp in its defer
                 )
                 let attemptTimeout = outcome.timeout
                 // postMoveEvents only returns without throwing when both
@@ -1076,25 +1082,24 @@ extension MenuBarItemManager {
                     for: destination,
                     on: resolvedDisplayID
                 )
-                // A notch press that the release put straight back is the
-                // signature of Control Center refusing the drop; repeating it
-                // repeats the refusal. Switch the remaining attempts to an
-                // on-screen press, the variant that has never failed.
-                if !landedOnDestination,
-                   outcome.revertedToStart,
-                   !outcome.pressedOnScreen,
-                   pressPointAfterRevert == nil
-                {
-                    pressPointAfterRevert = await hiddenDividerPressPoint(on: resolvedDisplayID)
-                    if let pressPointAfterRevert {
-                        MenuBarItemManager.diagLog.info(
-                            "Attempt \(n): \(item.logString) returned to its starting origin after the notch press; remaining attempts press on screen at (\(pressPointAfterRevert.x),\(pressPointAfterRevert.y)) inside the hidden divider"
+                // A release that puts the item straight back where it started
+                // is Control Center restoring the item's autosaved slot: the
+                // source app never registered the drop. Every press variant
+                // tried in the field — in the notch, on screen with the
+                // cursor warped — reverted the same way for minutes and the
+                // state then cleared by itself, so further attempts only
+                // cost time. Two in a row rule out a one-off nudge, the
+                // warm-up press #881 documents.
+                if !landedOnDestination, outcome.revertedToStart {
+                    revertedAttempts += 1
+                    if revertedAttempts >= 2 {
+                        MenuBarItemManager.diagLog.warning(
+                            "Attempt \(n): \(item.logString) was put back at its starting origin on every release; abandoning the move"
                         )
-                    } else {
-                        MenuBarItemManager.diagLog.debug(
-                            "Attempt \(n): \(item.logString) returned to its starting origin after the notch press, and no on-screen press point is available"
-                        )
+                        throw EventError.dropReverted(item)
                     }
+                } else {
+                    revertedAttempts = 0
                 }
                 // `postMoveEvents` only observes displacement. Let this
                 // single post-event landing check decide whether the next
@@ -1201,6 +1206,12 @@ extension MenuBarItemManager {
                 // the item's owner did nothing wrong, so no failure is filed
                 // against it.
                 if case EventError.staleDestination = error {
+                    throw error
+                }
+                // Raised by the revert check above, which has already logged.
+                // The owner answered every press, so no failure is filed
+                // against it either.
+                if case EventError.dropReverted = error {
                     throw error
                 }
                 if case EventError.moveSuperseded = error {
