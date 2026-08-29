@@ -467,13 +467,22 @@ private extension MoveFailureDiagnosticReport {
             + "width=\(format(item.bounds.width)) onScreen=\(item.isOnScreen) source=\(source)\(control)"
     }
 
+    /// The activation policy matters for the source app: a regular app whose
+    /// window is closed can be napped, and both revert episodes in the field
+    /// logs began right after a long idle stretch.
     static func processDescription(_ pid: pid_t, application: NSRunningApplication?) -> String {
         guard let application else {
             return "pid \(pid) (not a running application)"
         }
         let identity = application.bundleIdentifier
             ?? "no bundle identifier; name=\(application.localizedName ?? "unknown")"
-        return "pid \(pid) (\(identity))"
+        let policy = switch application.activationPolicy {
+        case .regular: "regular"
+        case .accessory: "accessory"
+        case .prohibited: "prohibited"
+        @unknown default: "unknown"
+        }
+        return "pid \(pid) (\(identity)) policy=\(policy)"
     }
 
     /// Other triggers' names stay out of the report; the fact of an
