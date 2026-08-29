@@ -87,6 +87,7 @@ $(SRCROOT)/Thaw/MenuBar/MenuBarItems/MenuBarItemServiceConnection.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/MenuBarItemTag+TriggerIdentity.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/MenuBarItemTag.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/PendingLedger.swift
+$(SRCROOT)/Thaw/MenuBar/MenuBarItems/SourcePIDSeedStore.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarItems/StaleIdentifierLedger.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarManager.swift
 $(SRCROOT)/Thaw/MenuBar/MenuBarSection.swift

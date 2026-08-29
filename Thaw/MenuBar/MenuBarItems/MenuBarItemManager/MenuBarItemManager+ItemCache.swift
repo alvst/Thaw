@@ -61,6 +61,20 @@ extension MenuBarItemManager {
             cachedItemPIDs = pids
         }
 
+        /// The source-PID seeds last written to defaults this session, so the
+        /// store is only rewritten when the attribution set changes.
+        private(set) var persistedSourcePIDSeeds: [SourcePIDSeed]?
+
+        /// Records `seeds` as persisted. Returns whether they differ from the
+        /// previously persisted set and therefore need writing.
+        func updatePersistedSourcePIDSeeds(_ seeds: [SourcePIDSeed]) -> Bool {
+            guard seeds != persistedSourcePIDSeeds else {
+                return false
+            }
+            persistedSourcePIDSeeds = seeds
+            return true
+        }
+
         /// Clears the list of cached menu bar item window identifiers.
         func clearCachedItemWindowIDs() {
             cachedItemWindowIDs.removeAll()
@@ -162,7 +176,7 @@ extension MenuBarItemManager {
     /// A pair of control items, taken from a list of menu bar items
     /// during a menu bar item cache operation.
     struct ControlItemPair {
-        nonisolated enum Resolution: Equatable, Sendable {
+        nonisolated enum Resolution: Equatable {
             case identity
             case axFrameCorrelation
         }
@@ -566,6 +580,42 @@ extension MenuBarItemManager {
         return ghostIDs
     }
 
+    /// Same-titled control-item windows left behind by a previous Thaw
+    /// instance, identified without a window number: all but the newest.
+    ///
+    /// On macOS 26 an `NSStatusItem`'s `window.windowNumber` is a synthetic
+    /// AppKit number (8589934592 in the field log), not the Control Center
+    /// window ID, so ``ghostControlItemWindowIDs(in:ownWindowIDsByTitle:)``
+    /// never sees its authoritative window and never discards anything. A
+    /// quitting instance's dividers stay hosted for tens of seconds after
+    /// the process is gone, collapsed to a point on screen, and the tag
+    /// lookup adopted them: the 2026-08-29 13:44:20 session cached its first
+    /// two cycles against the previous instance's divider at x=1399 and
+    /// dispatched a bulk apply from it. Window IDs are handed out
+    /// monotonically and a previous instance's windows always predate the
+    /// current instance's, so the newest window per title is ours. The same
+    /// rule covers a status item that was just recreated under its old
+    /// autosave name while the old window is still being torn down.
+    ///
+    /// Pure over its inputs.
+    static nonisolated func staleDuplicateControlItemWindowIDs(in items: [MenuBarItem]) -> Set<CGWindowID> {
+        var windowIDsByTitle = [String: [CGWindowID]]()
+        for item in items {
+            guard let title = item.title, title.hasPrefix("Thaw.ControlItem.") else {
+                continue
+            }
+            windowIDsByTitle[title, default: []].append(item.windowID)
+        }
+        var stale = Set<CGWindowID>()
+        for windowIDs in windowIDsByTitle.values where windowIDs.count > 1 {
+            guard let newest = windowIDs.max() else {
+                continue
+            }
+            stale.formUnion(windowIDs.filter { $0 != newest })
+        }
+        return stale
+    }
+
     private func ownControlItemWindowIDsByTitle() -> [String: CGWindowID] {
         guard let menuBarManager = appState?.menuBarManager else { return [:] }
         return MenuBarSection.Name.allCases.reduce(into: [:]) { result, name in
@@ -580,16 +630,64 @@ extension MenuBarItemManager {
 
     @discardableResult
     private func dropGhostControlItemWindows(from items: inout [MenuBarItem]) -> Set<CGWindowID> {
-        let ghostIDs = Self.ghostControlItemWindowIDs(
+        var ghostIDs = Self.ghostControlItemWindowIDs(
             in: items,
             ownWindowIDsByTitle: ownControlItemWindowIDsByTitle()
         )
-        guard !ghostIDs.isEmpty else { return [] }
-        MenuBarItemManager.diagLog.warning(
-            "cacheItemsRegardless: dropping \(ghostIDs.count) duplicate control item window(s)"
-        )
-        items.removeAll { ghostIDs.contains($0.windowID) }
+        if !ghostIDs.isEmpty {
+            MenuBarItemManager.diagLog.warning(
+                "cacheItemsRegardless: dropping \(ghostIDs.count) duplicate control item window(s)"
+            )
+            items.removeAll { ghostIDs.contains($0.windowID) }
+        }
+        let staleIDs = Self.staleDuplicateControlItemWindowIDs(in: items)
+        if !staleIDs.isEmpty {
+            MenuBarItemManager.diagLog.warning(
+                "cacheItemsRegardless: dropping \(staleIDs.count) stale control item window(s) from a previous instance \(staleIDs.sorted()); keeping the newest window per title"
+            )
+            items.removeAll { staleIDs.contains($0.windowID) }
+            ghostIDs.formUnion(staleIDs)
+        }
         return ghostIDs
+    }
+
+    /// How long after Control Center launches a failed control item lookup
+    /// is attributed to the restart rather than to Thaw's status items.
+    static nonisolated let controlCenterRelaunchGrace: Duration = .seconds(20)
+
+    /// Whether a failed control item lookup should count toward rebuilding
+    /// the status items.
+    ///
+    /// Control Center re-hosts every status item after it restarts, and for
+    /// the first seconds the enumeration is short: one second after the
+    /// 2026-08-29 13:40:54 restart it held three windows and no divider, and
+    /// the next cycle resolved normally. Counting those cycles would have
+    /// Thaw recreate its status items into the middle of the re-hosting,
+    /// which is how duplicate divider windows are made. An unknown uptime
+    /// (Control Center not found) counts, so a genuine loss is still
+    /// repaired.
+    ///
+    /// Pure over its inputs.
+    static nonisolated func shouldCountControlItemLookupFailure(
+        hostUptime: Duration?,
+        grace: Duration = controlCenterRelaunchGrace
+    ) -> Bool {
+        guard let hostUptime else {
+            return true
+        }
+        return hostUptime >= grace
+    }
+
+    /// How long Control Center has been running, or `nil` when it cannot
+    /// be found.
+    private static func controlCenterUptime() -> Duration? {
+        let controlCenter = NSRunningApplication.runningApplications(
+            withBundleIdentifier: MenuBarItemTag.Namespace.controlCenter.description
+        )
+        guard let launchDate = controlCenter.first?.launchDate else {
+            return nil
+        }
+        return .seconds(max(0, Date().timeIntervalSince(launchDate)))
     }
 
     /// Context maintained during a menu bar item cache operation.
@@ -1561,6 +1659,16 @@ extension MenuBarItemManager {
             // gone (e.g. their windowNumber no longer matches any
             // enumerated CG window ID), not that this one cycle raced a
             // transient WindowServer update.
+            let hostUptime = Self.controlCenterUptime()
+            guard Self.shouldCountControlItemLookupFailure(hostUptime: hostUptime) else {
+                MenuBarItemManager.diagLog.info(
+                    "cacheItemsRegardless: Missing control item for hidden section \(hostUptime.map { "\(Int($0.milliseconds / 1000)) s" } ?? "?") after Control Center launched; not counting it toward a rebuild while the bar is being re-hosted. Items remaining: \(items.count)"
+                )
+                await MainActor.run {
+                    self.areControlItemsMissing = true
+                }
+                return
+            }
             controlItemLookupFailureStreak += 1
             lastControlItemLookupFailureAt = .now
             let failureStreak = controlItemLookupFailureStreak
@@ -1917,6 +2025,14 @@ extension MenuBarItemManager {
                 uniquingKeysWith: { first, _ in first }
             )
             cacheActor.updateCachedItemPIDs(newPIDs)
+
+            // Remember the confirmed attributions for the next launch. See
+            // SourcePIDSeedStore for why: the resolver starts cold and the
+            // windows outlive Thaw.
+            let seeds = SourcePIDSeedStore.seeds(from: items, identity: SourcePIDSeedStore.liveIdentity(of:))
+            if cacheActor.updatePersistedSourcePIDSeeds(seeds) {
+                SourcePIDSeedStore.save(seeds, to: Defaults.store)
+            }
         }
 
         // Detect late-arriving items that belong to the active profile.

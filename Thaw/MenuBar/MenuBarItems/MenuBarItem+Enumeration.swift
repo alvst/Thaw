@@ -265,6 +265,22 @@ nonisolated extension MenuBarItem {
             )
         }
 
+        // Cold-start bridge: a window the service could not attribute this
+        // cycle, but did on an earlier launch, keeps that attribution while
+        // the same process is still behind it. Fresh resolutions above are
+        // never overridden. See SourcePIDSeedStore.
+        let seededWindowIDs = SourcePIDSeedStore.apply(
+            seeds: SourcePIDSeedStore.load(from: Defaults.store),
+            to: &pids,
+            windowIDs: windows.map(\.windowID),
+            liveIdentity: SourcePIDSeedStore.liveIdentity(of:)
+        )
+        if !seededWindowIDs.isEmpty {
+            diagLog.info(
+                "getMenuBarItems: seeded sourcePID for \(seededWindowIDs.count) window(s) from the last confirmed attribution: \(seededWindowIDs)"
+            )
+        }
+
         var items = windows.enumerated().map { index, window in
             let pid: pid_t? = controlItemIndices.contains(index) ? ownPID : pids[index]
             return MenuBarItem(uncheckedItemWindow: window, sourcePID: pid)
