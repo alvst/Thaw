@@ -95,6 +95,9 @@ final class MenuBarItemTriggersManager {
                 pendingApplyTasks[id] = nil
                 pendingApplyActions[id] = nil
             }
+            // An edit changes the inputs a failure was memoized against, so
+            // the edited trigger earns a fresh attempt straight away.
+            applyFailureBackoffs = applyFailureBackoffs.filter { liveIDs.contains($0.key) && !changedIDs.contains($0.key) }
             runScriptsIfNeeded()
             refreshImageHashesIfNeeded()
             scheduleEvaluation()
@@ -137,6 +140,10 @@ final class MenuBarItemTriggersManager {
 
     /// Target identifiers included in a queued or in-flight move.
     private var pendingMoveItemIdentifiers = [UUID: Set<String>]()
+
+    /// Per-trigger memo of the last definitive apply failure and when the
+    /// same action may be retried. See ``ApplyFailureBackoff``.
+    private var applyFailureBackoffs = [UUID: ApplyFailureBackoff]()
 
     /// Per-trigger debounced apply tasks. A flipped decision only moves its
     /// item after the new state has held for the condition's settle interval.
@@ -216,6 +223,62 @@ final class MenuBarItemTriggersManager {
         }
     }
 
+    /// A definitive apply failure for one trigger, and when the identical
+    /// action may be tried again.
+    ///
+    /// A move that ends in `.unavailable` (the target is present but not
+    /// movable, or did not enumerate this instant) or `.failed` (every drag
+    /// attempt exhausted) leaves the trigger's applied state cleared. On its
+    /// own that made the very next evaluation — every item-cache tick, i.e.
+    /// every couple of seconds — re-queue the identical action, and each
+    /// pass re-enumerated the menu bar with source-PID resolution before
+    /// failing the same way. Nothing in that loop can change the outcome:
+    /// its inputs only change when the trigger is edited, the decision
+    /// flips, the target's identity changes, or a move succeeds — each of
+    /// which drops the memo. Until then the same action is retried on a
+    /// growing schedule, so a transient miss still heals within seconds and
+    /// a permanent one costs one attempt per period instead of one per tick.
+    struct ApplyFailureBackoff: Equatable {
+        /// The action that failed. A different action is never held back.
+        var action: TriggerPriorityAction
+        /// The terminal status to keep showing while the action is held.
+        var status: MenuBarItemTriggerRuntimeStatus
+        /// Consecutive failures of this action, which set the delay.
+        var failureCount: Int
+        /// The earliest time the action may be applied again.
+        var retryAfter: Date
+
+        /// Retry delays by consecutive failure count; the last one repeats.
+        static let retryDelays: [TimeInterval] = [15, 30, 60, 120, 300, 600]
+
+        /// The delay to wait after the given number of consecutive failures.
+        static func retryDelay(afterFailures count: Int) -> TimeInterval {
+            retryDelays[min(max(count, 1), retryDelays.count) - 1]
+        }
+
+        /// Returns the memo to keep after `action` failed with `status`,
+        /// escalating the delay when the previous memo held the same action.
+        static func recording(
+            failureOf action: TriggerPriorityAction,
+            status: MenuBarItemTriggerRuntimeStatus,
+            previous: ApplyFailureBackoff?,
+            now: Date = Date()
+        ) -> ApplyFailureBackoff {
+            let failureCount = (previous?.action == action ? previous?.failureCount ?? 0 : 0) + 1
+            return ApplyFailureBackoff(
+                action: action,
+                status: status,
+                failureCount: failureCount,
+                retryAfter: now.addingTimeInterval(retryDelay(afterFailures: failureCount))
+            )
+        }
+
+        /// Whether `action` must not be applied at `now`.
+        func suppresses(_ action: TriggerPriorityAction, at now: Date) -> Bool {
+            self.action == action && now < retryAfter
+        }
+    }
+
     /// The system state used for evaluation, with cached script results
     /// merged in (the monitor itself does not run scripts).
     private var evaluationState: SystemState {
@@ -243,6 +306,18 @@ final class MenuBarItemTriggersManager {
         self.appState = appState
 
         systemMonitor.start(flags: featureFlags)
+
+        // Log the persisted rules once, so a field log on its own shows what
+        // each trigger targets. The rest of the log only ever names a target
+        // by its live identifier, and the configuration otherwise lives in
+        // UserDefaults, where a generic slot is indistinguishable from an app.
+        for trigger in triggers {
+            diagLog.info(
+                "Configured trigger \(trigger.displayName) enabled=\(trigger.isEnabled) "
+                    + "targets=\(trigger.allItemIdentifiers) reveal=\(trigger.revealSection.logString) "
+                    + "hide=\(trigger.hideSection.logString) conditions=\(trigger.conditionSummary)"
+            )
+        }
 
         // Item-manager setup follows settings setup. Claim configured targets
         // up front so its initial cache cannot restore a persisted pre-trigger
@@ -397,6 +472,7 @@ final class MenuBarItemTriggersManager {
         pendingMoveItemIdentifiers[id] = nil
         lastAppliedItemIdentifiers[id] = nil
         runtimeStatuses[id] = nil
+        applyFailureBackoffs[id] = nil
         pendingApplyTasks[id]?.cancel()
         pendingApplyTasks[id] = nil
         pendingApplyActions[id] = nil
@@ -412,6 +488,7 @@ final class MenuBarItemTriggersManager {
             pendingMoveItemIdentifiers[id] = nil
             lastAppliedItemIdentifiers[id] = nil
             runtimeStatuses[id] = nil
+            applyFailureBackoffs[id] = nil
             pendingApplyTasks[id]?.cancel()
             pendingApplyTasks[id] = nil
             pendingApplyActions[id] = nil
@@ -481,6 +558,7 @@ final class MenuBarItemTriggersManager {
         pendingMoveReveal = pendingMoveReveal.filter { liveIDs.contains($0.key) }
         pendingMoveItemIdentifiers = pendingMoveItemIdentifiers.filter { liveIDs.contains($0.key) }
         runtimeStatuses = runtimeStatuses.filter { liveIDs.contains($0.key) }
+        applyFailureBackoffs = applyFailureBackoffs.filter { liveIDs.contains($0.key) }
         for (id, task) in pendingApplyTasks where !liveIDs.contains(id) {
             task.cancel()
             pendingApplyTasks[id] = nil
@@ -547,6 +625,19 @@ final class MenuBarItemTriggersManager {
                 pendingApplyActions[trigger.id] = nil
                 setRuntimeStatus(.moving, for: trigger.id)
                 continue
+            }
+
+            // A definitive failure holds the identical action until its
+            // retry time. A different action is a changed input — the
+            // decision flipped or the target resolved to a new identity —
+            // and starts over with no memo.
+            if let backoff = applyFailureBackoffs[trigger.id] {
+                if backoff.action != action {
+                    applyFailureBackoffs[trigger.id] = nil
+                } else if backoff.suppresses(action, at: now) {
+                    setRuntimeStatus(backoff.status, for: trigger.id)
+                    continue
+                }
             }
 
             if action.identifiers.isEmpty {
@@ -1054,6 +1145,7 @@ final class MenuBarItemTriggersManager {
                             + "\(self.formattedElapsed(since: itemMoveStartedAt))"
                     )
                     self.setRuntimeStatus(.failed, for: trigger.id)
+                    self.recordApplyFailure(of: action, status: .failed, for: trigger)
                     self.finishPendingMove(for: trigger, action: action, applied: false, retry: false)
                     return
                 case .unavailable:
@@ -1062,6 +1154,7 @@ final class MenuBarItemTriggersManager {
                             + "\(self.formattedElapsed(since: itemMoveStartedAt))"
                     )
                     self.setRuntimeStatus(.unavailable, for: trigger.id)
+                    self.recordApplyFailure(of: action, status: .unavailable, for: trigger)
                     self.finishPendingMove(for: trigger, action: action, applied: false, retry: false)
                     return
                 case .protectedSystemItem:
@@ -1148,6 +1241,7 @@ final class MenuBarItemTriggersManager {
         if applied {
             lastAppliedReveal[trigger.id] = action.reveal
             lastAppliedItemIdentifiers[trigger.id] = action.identifierSet
+            applyFailureBackoffs[trigger.id] = nil
             setRuntimeStatus(action.reveal ? .active : .idle, for: trigger.id)
             return
         }
@@ -1217,6 +1311,28 @@ final class MenuBarItemTriggersManager {
         clearPendingMove(for: triggerID)
         lastAppliedReveal[triggerID] = nil
         lastAppliedItemIdentifiers[triggerID] = nil
+        applyFailureBackoffs[triggerID] = nil
+    }
+
+    /// Memoizes a definitive apply failure so ``evaluate(for:force:)`` holds
+    /// the identical action until its retry time instead of re-queueing it
+    /// on the next cache tick.
+    private func recordApplyFailure(
+        of action: TriggerPriorityAction,
+        status: MenuBarItemTriggerRuntimeStatus,
+        for trigger: MenuBarItemTrigger
+    ) {
+        let backoff = ApplyFailureBackoff.recording(
+            failureOf: action,
+            status: status,
+            previous: applyFailureBackoffs[trigger.id]
+        )
+        applyFailureBackoffs[trigger.id] = backoff
+        diagLog.info(
+            "Trigger \(trigger.displayName) apply failure #\(backoff.failureCount) for reveal=\(action.reveal) "
+                + "\(action.identifiers); holding this action for "
+                + "\(formattedSeconds(ApplyFailureBackoff.retryDelay(afterFailures: backoff.failureCount)))"
+        )
     }
 
     private func setRuntimeStatus(_ status: MenuBarItemTriggerRuntimeStatus, for triggerID: UUID) {

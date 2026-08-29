@@ -17,6 +17,21 @@ import Foundation
 /// here is instance-drift tolerant, because an item's `:N` suffix can change
 /// while a trigger owns it.
 extension MenuBarItemManager {
+    /// Whether a live item has an identity and capabilities that are safe to
+    /// persist in a conditional-placement rule.
+    ///
+    /// A Control Center-hosted `Item-N` with no resolved source PID can be
+    /// moved immediately when events address the window owner, but its tag is
+    /// only a temporary slot name. The same window may acquire an app-owned
+    /// identifier on the next cache pass, or disappear when a transient
+    /// system indicator ends. A trigger outlives that live window, so its
+    /// picker must require a stable identity even though the layout editor's
+    /// one-shot drag does not.
+    static nonisolated func isReliableTriggerItemOption(_ item: MenuBarItem) -> Bool {
+        !item.hasProvisionalIdentity
+            && item.isMovableAddressingWindowOwner
+            && item.canBeHidden
+    }
 
     /// Updates the set of items whose temporary placement is currently owned
     /// by conditional triggers.
@@ -328,14 +343,25 @@ extension MenuBarItemManager {
             )
             return .unavailable
         }
+        guard !target.hasProvisionalIdentity else {
+            MenuBarItemManager.diagLog.warning(
+                "moveItem(trigger): refusing provisional target \(target.logString); its identifier can change when source-PID resolution catches up"
+            )
+            return .unavailable
+        }
         guard Self.triggerMovePreflight(for: target.tag, to: section) == .allowed else {
             MenuBarItemManager.diagLog.warning(
                 "moveItem(trigger): refusing to hide \(target.logString); macOS governs its menu bar visibility preference"
             )
             return .protectedSystemItem
         }
-        guard target.isMovable else {
-            MenuBarItemManager.diagLog.debug("moveItem(trigger): \(target.logString) is not movable")
+        // Mirror `move(item:to:)`'s dispatch-aware gate. Provisional slots
+        // were rejected above because persistence, rather than event routing,
+        // is what makes them unsafe for triggers.
+        guard target.isMovableAddressingWindowOwner else {
+            MenuBarItemManager.diagLog.warning(
+                "moveItem(trigger): refusing \(target.logString): \(target.immovabilityReason?.logDescription ?? "isMovable false with no named gate")"
+            )
             return .unavailable
         }
         // Items destined for a hidden section must actually be hideable.

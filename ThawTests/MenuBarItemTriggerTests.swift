@@ -120,6 +120,44 @@ final class MenuBarItemTriggerTests: XCTestCase {
         )
     }
 
+    /// A live Control Center slot can be movable for a one-shot drag while
+    /// still being unsafe to persist: its fallback `Item-N` identifier is
+    /// replaced when source-PID resolution finds the owning app.
+    func testTriggerTargetPickerRejectsProvisionalControlCenterIdentity() {
+        let item = MenuBarItem.fixture(
+            tag: MenuBarItemTag(namespace: .controlCenter, title: "Item-8"),
+            windowID: 430,
+            sourcePID: nil
+        )
+
+        XCTAssertTrue(item.hasProvisionalIdentity)
+        XCTAssertFalse(MenuBarItemManager.isReliableTriggerItemOption(item))
+    }
+
+    func testTriggerTargetPickerAcceptsStableHideableAppItem() {
+        let item = MenuBarItem.fixture(
+            tag: .appItem(bundleID: "com.example.IconSwitcher", title: "Item-0"),
+            windowID: 1223,
+            sourcePID: 25506
+        )
+
+        XCTAssertFalse(item.hasProvisionalIdentity)
+        XCTAssertTrue(MenuBarItemManager.isReliableTriggerItemOption(item))
+    }
+
+    /// Generic Control Center items with a resolved source are transient
+    /// system modules (for example Live Activities) and cannot be hidden.
+    func testTriggerTargetPickerRejectsResolvedTransientControlCenterItem() {
+        let item = MenuBarItem.fixture(
+            tag: MenuBarItemTag(namespace: .controlCenter, title: "Item-8"),
+            windowID: 431,
+            sourcePID: 645
+        )
+
+        XCTAssertTrue(item.isTransientControlCenterItem)
+        XCTAssertFalse(MenuBarItemManager.isReliableTriggerItemOption(item))
+    }
+
     // MARK: - Applications
 
     func testFrontmostApp() {
@@ -1483,5 +1521,67 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertEqual(power.batteryPercentage, 42)
         XCTAssertFalse(power.isOnACPower)
         XCTAssertFalse(power.isCharging)
+    }
+
+    // MARK: - Apply failure backoff
+
+    private typealias ApplyFailureBackoff = MenuBarItemTriggersManager.ApplyFailureBackoff
+    private typealias PriorityAction = MenuBarItemTriggersManager.TriggerPriorityAction
+
+    /// A memoized failure holds back exactly the action that failed, and only
+    /// until its retry time. A flipped decision or a target that resolved to
+    /// a new identity is a different action and is never held.
+    func testApplyFailureBackoffHoldsOnlyTheIdenticalAction() {
+        let action = PriorityAction(reveal: false, identifiers: ["com.apple.controlcenter:Item-8"])
+        let now = Date()
+
+        let backoff = ApplyFailureBackoff.recording(
+            failureOf: action,
+            status: .unavailable,
+            previous: nil,
+            now: now
+        )
+
+        XCTAssertEqual(backoff.failureCount, 1)
+        XCTAssertEqual(backoff.status, .unavailable)
+        XCTAssertEqual(backoff.retryAfter, now.addingTimeInterval(15))
+        XCTAssertTrue(backoff.suppresses(action, at: now))
+        XCTAssertTrue(backoff.suppresses(action, at: now.addingTimeInterval(14)))
+        XCTAssertFalse(backoff.suppresses(action, at: now.addingTimeInterval(15)))
+
+        let flipped = PriorityAction(reveal: true, identifiers: action.identifiers)
+        XCTAssertFalse(backoff.suppresses(flipped, at: now))
+
+        let resolved = PriorityAction(reveal: false, identifiers: ["com.example.App:Item-0"])
+        XCTAssertFalse(backoff.suppresses(resolved, at: now))
+    }
+
+    /// Repeated failures of the same action escalate the delay up to the
+    /// cap; a failure of a different action starts the schedule over.
+    func testApplyFailureBackoffEscalatesAndResetsOnNewAction() {
+        let action = PriorityAction(reveal: false, identifiers: ["com.apple.controlcenter:Item-8"])
+        let now = Date()
+
+        var backoff: ApplyFailureBackoff?
+        for (index, delay) in [15.0, 30, 60, 120, 300, 600, 600].enumerated() {
+            backoff = ApplyFailureBackoff.recording(
+                failureOf: action,
+                status: .failed,
+                previous: backoff,
+                now: now
+            )
+            XCTAssertEqual(backoff?.failureCount, index + 1)
+            XCTAssertEqual(backoff?.retryAfter, now.addingTimeInterval(delay), "failure #\(index + 1)")
+        }
+
+        let other = PriorityAction(reveal: true, identifiers: action.identifiers)
+        let fresh = ApplyFailureBackoff.recording(
+            failureOf: other,
+            status: .failed,
+            previous: backoff,
+            now: now
+        )
+        XCTAssertEqual(fresh.failureCount, 1)
+        XCTAssertEqual(fresh.retryAfter, now.addingTimeInterval(15))
     }
 }

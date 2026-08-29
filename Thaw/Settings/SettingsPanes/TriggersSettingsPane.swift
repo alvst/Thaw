@@ -375,8 +375,13 @@ struct TriggersSettingsPane: View {
     // MARK: Options refresh
 
     private func refreshItemOptions() {
+        // A trigger persists its target, unlike a one-shot layout drag. Do
+        // not offer provisional Control Center slots whose `Item-N` identity
+        // can change on the next source-resolution pass, or transient items
+        // that cannot be hidden. Protected system modules remain here for
+        // image observation and are removed only from `targetItemOptions`.
         let items = itemManager.itemCache.managedItems
-            .filter { $0.tag.isMovable && $0.tag.canBeHidden }
+            .filter(MenuBarItemManager.isReliableTriggerItemOption)
 
         var nameCounts = [String: Int]()
         for item in items {
@@ -385,7 +390,8 @@ struct TriggersSettingsPane: View {
 
         var options = items.map { item -> TriggerItemOption in
             let base = item.displayName
-            let name = (nameCounts[base] ?? 0) > 1 ? "\(base) — \(item.tag.tagIdentifier)" : base
+            let needsIdentifier = (nameCounts[base] ?? 0) > 1
+            let name = needsIdentifier ? "\(base) — \(item.tag.tagIdentifier)" : base
             return TriggerItemOption(
                 id: item.tag.tagIdentifier,
                 name: name,
