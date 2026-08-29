@@ -90,6 +90,25 @@ extension MenuBarItemManager {
         CGPoint(x: notchFrameAppKit.midX, y: targetPointCoreGraphics.y)
     }
 
+    /// How a drop's synthetic events are shaped.
+    nonisolated enum MoveStrategy: Equatable, CustomStringConvertible {
+        /// The Ice press-at-destination trick: a press stamped with the moved
+        /// item's window is posted at the destination and Control Center
+        /// relocates the passive item to it.
+        case teleport
+        /// A faithful gesture: a press on the item where it sits, a few drag
+        /// steps, then a release at the destination, so the source app starts
+        /// the drag itself with a warm status-item scene.
+        case faithfulDrag
+
+        var description: String {
+            switch self {
+            case .teleport: "teleport"
+            case .faithfulDrag: "faithfulDrag"
+            }
+        }
+    }
+
     /// What one round of move events observed, beyond the timeout budget the
     /// next round inherits.
     nonisolated struct MoveEventsOutcome {
@@ -98,6 +117,52 @@ extension MenuBarItemManager {
         /// Whether the item ended exactly where it started: it followed the
         /// press and the release put it straight back.
         var revertedToStart: Bool
+        /// Which drop strategy actually ran, for the field log.
+        var strategy: MoveStrategy
+    }
+
+    /// A pure builder for a faithful drag gesture: the ordered synthetic
+    /// events that press on an item where it sits and drag it to a
+    /// destination, mimicking a real ⌘-drag.
+    ///
+    /// Separated from event creation so the geometry and ordering are unit
+    /// testable without a live menu bar. The caller is responsible for
+    /// pinning `start.y` and `end.y` to the menu bar's vertical midline: a
+    /// gesture that stays on one horizontal line inside the bar reads to
+    /// Control Center as a reorder, whereas a path that dips below the bar is
+    /// read as a *removal* — the gesture that orphaned a hosted item's scene
+    /// in the field (`Completing drag by removing dragged object from menu
+    /// bar`, `0 not configured to allow removal`).
+    nonisolated enum MoveGesture {
+        /// One synthetic event in a gesture: its move subtype and location.
+        struct Step: Equatable {
+            let subtype: MenuBarItemEventType.MoveSubtype
+            let point: CGPoint
+        }
+
+        /// Builds the ordered steps for a faithful drag from `start` to `end`.
+        ///
+        /// The sequence is always a single mouse-down on the item, then
+        /// `max(1, intermediateSteps)` drag steps interpolated strictly
+        /// between the endpoints, then a drag step that settles on the
+        /// destination, then the release there. The trailing drag-at-`end`
+        /// before the release mirrors a real drop, where the pointer comes to
+        /// rest on the target before the button is let go.
+        static func faithfulDrag(start: CGPoint, end: CGPoint, intermediateSteps: Int) -> [Step] {
+            let steps = max(1, intermediateSteps)
+            var result = [Step(subtype: .mouseDown, point: start)]
+            for index in 1 ... steps {
+                let t = CGFloat(index) / CGFloat(steps + 1)
+                let point = CGPoint(
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t
+                )
+                result.append(Step(subtype: .mouseDragged, point: point))
+            }
+            result.append(Step(subtype: .mouseDragged, point: end))
+            result.append(Step(subtype: .mouseUp, point: end))
+            return result
+        }
     }
 
     /// Serializes moves app-wide.
@@ -523,15 +588,28 @@ extension MenuBarItemManager {
         var itemOrigin = itemBounds.origin
         let targetPoints = try await getTargetPoints(forMoving: item, to: destination, on: displayID)
 
-        // Press and release at the *destination* (targetPoints.start == .end
-        // == the target edge) with the moved item's window ID stamped on the
-        // press, relying on the owner to relocate its item to the press
-        // location. Every move observed in #881 needed a warm-up attempt
-        // before that took: the first press nudged the item a pixel, the
-        // second teleported it. A drag-gesture geometry was trialled behind
-        // a setting to remove that warm-up and did not fix it, so it was
-        // withdrawn; the warm-up attempt remains an open problem.
-        let pressPoint = targetPoints.start
+        // Two drop strategies (see `MoveStrategy`):
+        //
+        // Teleport (default, unchanged): press and release at the
+        // *destination* (targetPoints.start == .end == the target edge) with
+        // the moved item's window ID stamped on the press, relying on the
+        // owner to relocate its item to the press location. Every move
+        // observed in #881 needed a warm-up attempt before that took: the
+        // first press nudged the item a pixel, the second teleported it.
+        //
+        // Faithful drag (opt-in, `faithfulDragMoves`): press on the item
+        // where it sits and drag it to the destination, so the source app
+        // starts the drag itself with a warm status-item scene rather than
+        // Control Center relocating a passive item whose cold scene can drop
+        // the commit (the revert). Eligible only when the item is on screen,
+        // so the press lands on it; the teleport is the fallback otherwise.
+        let dragPlan = faithfulDragSteps(
+            forMoving: item,
+            itemBounds: itemBounds,
+            targetPoints: targetPoints
+        )
+        let strategy: MoveStrategy = dragPlan == nil ? .teleport : .faithfulDrag
+        let pressPoint = dragPlan?.first?.point ?? targetPoints.start
 
         // Capture mouse location only when this call owns the cursor warp.
         // When called from move(), the outer move() handles the single warp
@@ -560,6 +638,9 @@ extension MenuBarItemManager {
 
         var timeout = getMoveOperationTimeout(for: item)
         MenuBarItemManager.diagLog.debug("Move operation timeout: \(timeout)")
+        MenuBarItemManager.diagLog.info(
+            "Move strategy: \(strategy) for \(item.logString); press at (\(pressPoint.x),\(pressPoint.y)), release at (\(targetPoints.end.x),\(targetPoints.end.y))"
+        )
 
         lastMoveOperationTimestamp = .now
         // Skip the warp when the target is offscreen (negative-X items in
@@ -635,27 +716,37 @@ extension MenuBarItemManager {
         }
 
         do {
-            try await scrombleEvent(
-                mouseDown,
-                item: item,
-                timeout: timeout
-            )
-            itemOrigin = try await waitForMoveEventResponse(
-                from: item,
-                initialOrigin: itemOrigin,
-                timeout: timeout
-            )
-            try await scrombleEvent(
-                mouseUp,
-                item: item,
-                timeout: timeout,
-                repeating: 2 // Double mouse up prevents invalid item state.
-            )
-            itemOrigin = try await waitForMoveEventResponse(
-                from: item,
-                initialOrigin: itemOrigin,
-                timeout: timeout
-            )
+            if let dragPlan {
+                itemOrigin = try await postFaithfulDragSteps(
+                    dragPlan,
+                    item: item,
+                    source: source,
+                    startOrigin: itemOrigin,
+                    timeout: timeout
+                )
+            } else {
+                try await scrombleEvent(
+                    mouseDown,
+                    item: item,
+                    timeout: timeout
+                )
+                itemOrigin = try await waitForMoveEventResponse(
+                    from: item,
+                    initialOrigin: itemOrigin,
+                    timeout: timeout
+                )
+                try await scrombleEvent(
+                    mouseUp,
+                    item: item,
+                    timeout: timeout,
+                    repeating: 2 // Double mouse up prevents invalid item state.
+                )
+                itemOrigin = try await waitForMoveEventResponse(
+                    from: item,
+                    initialOrigin: itemOrigin,
+                    timeout: timeout
+                )
+            }
         } catch {
             do {
                 MenuBarItemManager.diagLog.warning("Move events failed, posting fallback")
@@ -677,10 +768,129 @@ extension MenuBarItemManager {
         let revertedToStart = itemOrigin == itemBounds.origin
         if revertedToStart {
             MenuBarItemManager.diagLog.debug(
-                "Move events left \(item.logString) at its starting origin (\(itemOrigin.x),\(itemOrigin.y)) after pressing at (\(mouseDown.location.x),\(mouseDown.location.y))"
+                "Move events (\(strategy)) left \(item.logString) at its starting origin (\(itemOrigin.x),\(itemOrigin.y)) after pressing at (\(mouseDown.location.x),\(mouseDown.location.y))"
             )
         }
-        return MoveEventsOutcome(timeout: timeout, revertedToStart: revertedToStart)
+        return MoveEventsOutcome(timeout: timeout, revertedToStart: revertedToStart, strategy: strategy)
+    }
+
+    /// The ordered faithful-drag steps to use for the given move, or `nil` to
+    /// use the teleport instead.
+    ///
+    /// Returns a plan only when the faithful drag is both enabled and safe:
+    /// the flag is on, the item is not one of Thaw's own dividers, and the
+    /// item is currently on screen so the mouse-down lands on it. Every step
+    /// is pinned to the item's own vertical midline (the menu bar line), so
+    /// the whole gesture stays on the bar and Control Center reads a reorder
+    /// rather than a removal. `targetPoints.end.x` is reused verbatim, so a
+    /// zero-width divider's ±1 side bias and an off-screen destination's
+    /// parked X both carry through unchanged.
+    private func faithfulDragSteps(
+        forMoving item: MenuBarItem,
+        itemBounds: CGRect,
+        targetPoints: (start: CGPoint, end: CGPoint)
+    ) -> [MoveGesture.Step]? {
+        guard faithfulDragMovesEnabled else {
+            return nil
+        }
+        // Never drag Thaw's own section dividers this way; their teleport
+        // handling (zero-width side bias, recreate-on-collapse) is bespoke.
+        guard !item.isControlItem else {
+            return nil
+        }
+        // The press has to land on the item, so the item must be on screen.
+        let barY = itemBounds.midY
+        let start = CGPoint(x: itemBounds.midX, y: barY)
+        let itemIsOnScreen = NSScreen.screens.contains {
+            CGDisplayBounds($0.displayID).contains(start)
+        }
+        guard itemIsOnScreen else {
+            return nil
+        }
+        // Keep the release on the same bar line as the press; only the
+        // horizontal edge of the destination matters for the drop side.
+        let end = CGPoint(x: targetPoints.end.x, y: barY)
+        return MoveGesture.faithfulDrag(start: start, end: end, intermediateSteps: 3)
+    }
+
+    /// Posts a faithful drag: a mouse-down on the item, a few drag steps, then
+    /// a release at the destination. Returns the item's resting origin so the
+    /// caller can detect a revert.
+    ///
+    /// Unlike the teleport, the mouse-down lands on the item where it already
+    /// sits, so the item does not move on the press; the response wait is
+    /// therefore placed after the drag steps (the item follows the drag off
+    /// its start) and before the release. On a revert the item snaps back only
+    /// after the release, so the resting origin is sampled once the drop has
+    /// had a moment to settle. All events are stamped with the moved item's
+    /// window — this is one continuous gesture on that item.
+    private func postFaithfulDragSteps(
+        _ steps: [MoveGesture.Step],
+        item: MenuBarItem,
+        source: CGEventSource,
+        startOrigin: CGPoint,
+        timeout: Duration
+    ) async throws -> CGPoint {
+        let dragSteps = steps.dropLast() // Everything up to and including the last drag.
+        guard let releaseStep = steps.last, releaseStep.subtype == .mouseUp else {
+            throw EventError.eventCreationFailure(item)
+        }
+        for step in dragSteps {
+            guard let event = CGEvent.menuBarItemEvent(
+                item: item,
+                source: source,
+                type: .move(step.subtype),
+                location: step.point
+            ) else {
+                throw EventError.eventCreationFailure(item)
+            }
+            try await scrombleEvent(event, item: item, timeout: timeout)
+            if step.subtype == .mouseDragged {
+                // A human-cadence pause so Control Center's drag tracker
+                // follows the item between steps.
+                await eventSleep(for: .milliseconds(8))
+            }
+        }
+        // Confirm the item actually followed the drag off its start position;
+        // a drag that displaced nothing is a real failure, handled by the
+        // caller's fallback and retry exactly like the teleport's.
+        var itemOrigin = try await waitForMoveEventResponse(
+            from: item,
+            initialOrigin: startOrigin,
+            timeout: timeout
+        )
+        guard let release = CGEvent.menuBarItemEvent(
+            item: item,
+            source: source,
+            type: .move(releaseStep.subtype),
+            location: releaseStep.point
+        ) else {
+            throw EventError.eventCreationFailure(item)
+        }
+        try await scrombleEvent(
+            release,
+            item: item,
+            timeout: timeout,
+            repeating: 2 // Double mouse up prevents invalid item state.
+        )
+        // Let the drop settle, then read where the item came to rest. Unlike
+        // the teleport's post-release wait, this must not require an origin
+        // *change*: a revert leaves the item back at its start, and demanding
+        // a change would time it out into a spurious itemResponseTimeout.
+        await eventSleep(for: .milliseconds(30))
+        if let resting = try? await getCurrentBounds(for: item).origin {
+            itemOrigin = resting
+            MenuBarItemManager.diagLog.debug(
+                "Faithful drag released \(item.logString); resting origin (\(resting.x),\(resting.y))"
+            )
+        }
+        return itemOrigin
+    }
+
+    /// Whether eligible moves use the faithful drag rather than the teleport.
+    /// See ``Defaults/Key/faithfulDragMoves``.
+    private var faithfulDragMovesEnabled: Bool {
+        (Defaults.object(forKey: .faithfulDragMoves) as? Bool) ?? Defaults.DefaultValue.faithfulDragMoves
     }
 
     /// Checks if a menu bar item is in a "blocked" state (positioned at x=-1 off-screen).
@@ -1118,7 +1328,7 @@ extension MenuBarItemManager {
                     // straight off a field log: grep "Move landed" and compare
                     // the attempt counts.
                     MenuBarItemManager.diagLog.info(
-                        "Move landed: \(item.logString) after \(n) attempt(s)"
+                        "Move landed: \(item.logString) after \(n) attempt(s) via \(outcome.strategy)"
                     )
                     MenuBarItemManager.diagLog.debug("Attempt \(n) succeeded and verified, finished with move")
                     failureLedger.recordSuccess(for: item)
