@@ -90,6 +90,63 @@ extension MenuBarItemManager {
         CGPoint(x: notchFrameAppKit.midX, y: targetPointCoreGraphics.y)
     }
 
+    /// Polls `read` until two consecutive readings agree, or `maxPolls`
+    /// readings have been taken. Returns the last reading and whether the
+    /// one before it confirmed it.
+    static nonisolated func settledReading<Value: Equatable>(
+        maxPolls: Int,
+        read: () async -> Value,
+        wait: () async -> Void
+    ) async -> (value: Value, settled: Bool) {
+        var previous = await read()
+        var polls = 1
+        while polls < maxPolls {
+            await wait()
+            let current = await read()
+            polls += 1
+            if current == previous {
+                return (current, true)
+            }
+            previous = current
+        }
+        return (previous, false)
+    }
+
+    /// Waits for the moved item and its target to stop moving, so a landing
+    /// is judged against the bar as it will stay rather than mid-animation.
+    ///
+    /// Control Center animates a re-layout. With the hidden section shown,
+    /// dropping an item to the right of its zero-width divider leaves the
+    /// divider sliding left by the item's width for a few hundred
+    /// milliseconds. A verifier that read it mid-slide saw the item on the
+    /// wrong side, re-dragged, and after three such readings abandoned the
+    /// move as a retreating target — while the item had been in place since
+    /// the first drop (every one of the 28 trigger reveals that "failed" in
+    /// one field log, each found already in its section moments later).
+    ///
+    /// Bounded: a target that never holds still costs at most `maxPolls`
+    /// intervals, and the common case — nothing animating — returns after a
+    /// single interval.
+    nonisolated func waitForLayoutToSettle(
+        item: MenuBarItem,
+        target: MenuBarItem,
+        interval: Duration = .milliseconds(25),
+        maxPolls: Int = 24
+    ) async {
+        let outcome = await Self.settledReading(
+            maxPolls: maxPolls,
+            read: {
+                [Bridging.getWindowBounds(for: item.windowID), Bridging.getWindowBounds(for: target.windowID)]
+            },
+            wait: { await self.eventSleep(for: interval) }
+        )
+        if !outcome.settled {
+            MenuBarItemManager.diagLog.debug(
+                "Layout still changing after \(maxPolls) polls while moving \(item.logString) relative to \(target.logString); verifying anyway"
+            )
+        }
+    }
+
     /// Returns the default timeout for move operations associated
     /// with the given item.
     ///
@@ -938,6 +995,9 @@ extension MenuBarItemManager {
                 // waitForMoveEventResponse calls observed origin changes,
                 // i.e. our drag actually displaced the item.
                 anyMoveEventsSucceeded = true
+                // Judge the landing against the bar as it will stay, not
+                // mid-animation. See `waitForLayoutToSettle`.
+                await waitForLayoutToSettle(item: item, target: destination.targetItem)
                 // Verify the item actually reached the correct position.
                 let landedOnDestination = try await itemHasCorrectPosition(
                     item: item,

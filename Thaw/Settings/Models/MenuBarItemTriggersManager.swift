@@ -638,6 +638,20 @@ final class MenuBarItemTriggersManager {
             if let backoff = applyFailureBackoffs[trigger.id] {
                 if backoff.action != action {
                     applyFailureBackoffs[trigger.id] = nil
+                } else if actionMatchesCurrentPlacement(action, for: trigger, appState: appState) {
+                    // The bar caught up with a move that reported failure,
+                    // or someone placed the item by hand: it is where the
+                    // action wants it, which is all "applied" ever meant.
+                    // Holding a failure against a placement that is already
+                    // right would only show "failed" for the backoff period.
+                    applyFailureBackoffs[trigger.id] = nil
+                    lastAppliedReveal[trigger.id] = action.reveal
+                    lastAppliedItemIdentifiers[trigger.id] = action.identifierSet
+                    setRuntimeStatus(action.reveal ? .active : .idle, for: trigger.id)
+                    diagLog.info(
+                        "Trigger \(trigger.displayName) target(s) already placed for reveal=\(action.reveal); clearing the held failure"
+                    )
+                    continue
                 } else if backoff.suppresses(action, at: now) {
                     setRuntimeStatus(backoff.status, for: trigger.id)
                     continue

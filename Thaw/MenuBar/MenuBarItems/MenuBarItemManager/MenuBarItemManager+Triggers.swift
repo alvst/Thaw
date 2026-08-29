@@ -439,10 +439,56 @@ extension MenuBarItemManager {
             )
             return .deferred
         } catch {
+            // A move can land and still throw: the verifier gives up on a
+            // target it saw retreating while Control Center was only sliding
+            // it into its final slot. Ask the bar itself before reporting a
+            // failure, which would hold this action for the backoff period
+            // while the item already sits where the trigger wanted it.
+            await waitForLayoutToSettle(item: target, target: destination.targetItem)
+            let liveSection = await liveSection(
+                ofWindow: target.windowID,
+                hiddenControlItemWindowID: hiddenControlItemWID,
+                alwaysHiddenControlItemWindowID: alwaysHiddenControlItemWID,
+                displayID: displayID
+            )
+            if liveSection == resolvedSection {
+                MenuBarItemManager.diagLog.info(
+                    "moveItem(trigger): move of \(target.logString) threw \(error) but the item is in \(resolvedSection.logString); treating as moved"
+                )
+                return .moved
+            }
             MenuBarItemManager.diagLog.error(
                 "moveItem(trigger): failed to move to \(resolvedSection.logString) via \(destination.logString): \(target.logString); error=\(error)"
             )
             return .failed
         }
+    }
+
+    /// The section a window sits in right now, read from a fresh enumeration
+    /// so a divider that moved during the drag is judged where it ended up,
+    /// not where the move was planned against.
+    private func liveSection(
+        ofWindow windowID: CGWindowID,
+        hiddenControlItemWindowID: CGWindowID?,
+        alwaysHiddenControlItemWindowID: CGWindowID?,
+        displayID: CGDirectDisplayID?
+    ) async -> MenuBarSection.Name? {
+        // Identity is irrelevant here — the window is matched by ID — so
+        // skip source-PID resolution.
+        var items = await MenuBarItem
+            .getMenuBarItems(on: nil, option: .activeSpace, resolveSourcePID: false)
+            .filter { !$0.isSystemClone }
+        guard let item = items.first(where: { $0.windowID == windowID }) else {
+            return nil
+        }
+        guard let controlItems = ControlItemPair(
+            items: &items,
+            hiddenControlItemWindowID: hiddenControlItemWindowID,
+            alwaysHiddenControlItemWindowID: alwaysHiddenControlItemWindowID
+        ) else {
+            return nil
+        }
+        var context = CacheContext(controlItems: controlItems, displayID: displayID)
+        return context.findSection(for: item)
     }
 }
