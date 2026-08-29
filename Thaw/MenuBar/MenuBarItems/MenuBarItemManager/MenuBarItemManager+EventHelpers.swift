@@ -68,6 +68,13 @@ extension MenuBarItemManager {
         /// minutes at a time for one item — every press variant reverted the
         /// same way — and then clear by itself, so retrying only costs time.
         case dropReverted(MenuBarItem)
+        /// Another move held the bar for the whole gate wait. Says nothing
+        /// about the item; callers treat it as a deferral.
+        case moveEngineBusy(MenuBarItem)
+        /// A press outlived its deadline and was released by the guard, or
+        /// the move as a whole ran past its deadline. Whatever reply came
+        /// back after that describes a press that was no longer down.
+        case moveTimedOut(MenuBarItem)
 
         var description: String {
             switch self {
@@ -101,6 +108,10 @@ extension MenuBarItemManager {
                 "\(Self.self).moveSuperseded(item: \(item.tag))"
             case let .dropReverted(item):
                 "\(Self.self).dropReverted(item: \(item.tag))"
+            case let .moveEngineBusy(item):
+                "\(Self.self).moveEngineBusy(item: \(item.tag))"
+            case let .moveTimedOut(item):
+                "\(Self.self).moveTimedOut(item: \(item.tag))"
             }
         }
 
@@ -136,6 +147,10 @@ extension MenuBarItemManager {
                 "The requested move for \"\(item.displayName)\" is no longer current"
             case let .dropReverted(item):
                 "\"\(item.displayName)\" could not be kept in its new position"
+            case let .moveEngineBusy(item):
+                "Another move was still in progress when \"\(item.displayName)\" was to be moved"
+            case let .moveTimedOut(item):
+                "Moving \"\(item.displayName)\" took too long and was stopped"
             }
         }
 
@@ -145,6 +160,8 @@ extension MenuBarItemManager {
                 nil
             case let .dropReverted(item):
                 "macOS put \"\(item.displayName)\" back after every attempt. This usually clears on its own within a few minutes; clicking the item, or quitting and reopening its app, resets it sooner. If it keeps happening, please file a bug report."
+            case .moveEngineBusy:
+                "Wait a moment for the move in progress to finish, then try again."
             default:
                 "Please try again. If the error persists, please file a bug report."
             }
@@ -168,7 +185,8 @@ extension MenuBarItemManager {
                 true
             case .cannotComplete, .invalidEventSource, .missingMouseLocation, .eventCreationFailure,
                  .itemNotMovable, .missingItemBounds, .menuTrackingActive, .eventWindowMismatch,
-                 .staleDestination, .inputPauseTimedOut, .moveSuperseded, .dropReverted:
+                 .staleDestination, .inputPauseTimedOut, .moveSuperseded, .dropReverted,
+                 .moveEngineBusy, .moveTimedOut:
                 false
             }
         }

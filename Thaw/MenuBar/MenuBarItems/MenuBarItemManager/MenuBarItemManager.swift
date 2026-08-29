@@ -223,6 +223,11 @@ final class MenuBarItemManager {
     /// Cached timeouts for move operations.
     var moveOperationTimeouts = [MenuBarItemTag: Duration]()
 
+    /// Items whose most recent move macOS refused — every release put the
+    /// item straight back — keyed by `uniqueIdentifier`, with when. See
+    /// `noteRefusedMove(of:)`.
+    var macOSRefusedMoves = [String: ContinuousClock.Instant]()
+
     /// Cached timeouts for click operations (adaptive per app).
     var clickOperationTimeouts = [MenuBarItemTag: Duration]()
     /// Serialization gate for cache operations.
@@ -523,9 +528,22 @@ final class MenuBarItemManager {
     /// A clean batch clears the arm rather than leaving it to expire: the
     /// bar now matches what the apply set out to produce, and there is no
     /// reason to keep withholding it from the saved order.
-    func recordBulkApplyOutcome(unenactedMoveCount: Int) {
+    ///
+    /// Moves macOS refused — releases that put the item straight back — are
+    /// counted apart from moves the batch failed to enact. They do not arm
+    /// the save withhold or the circuit breaker: the refused item keeps its
+    /// saved slot through `computeSectionOrder`, so persisting the rest of
+    /// the arrangement records nothing the batch did not intend, and a bar
+    /// with one refusing item must not lose automatic layout maintenance
+    /// for the session (the breaker hard-caps after six unfinished batches).
+    func recordBulkApplyOutcome(unenactedMoveCount: Int, refusedMoveCount: Int = 0) {
         bulkApplyOutcomeGeneration += 1
         lastBulkApplyUnenactedMoveCount = unenactedMoveCount
+        if refusedMoveCount > 0 {
+            MenuBarItemManager.diagLog.info(
+                "Profile layout: \(refusedMoveCount) move(s) refused by macOS; their items keep their saved slots"
+            )
+        }
         guard unenactedMoveCount > 0 else {
             unfinishedMoveBatchObservedAt = nil
             consecutiveUnfinishedBulkApplies = 0
@@ -1088,12 +1106,19 @@ final class MenuBarItemManager {
         )
         notchOverflowEjectedUIDs = ejectedStillInHidden
 
+        // An item macOS refused to move sits wherever the refusal left it,
+        // which is not where anyone put it. Treat it like a closed app so
+        // the merge below keeps its saved slot; the record clears when a
+        // move of it lands or the refusal ages out.
+        let refusedIdentifiers = refusedMoveIdentifiers()
+
         var allCurrentIdentifiers = Set<String>()
         var allCurrentBaseIdentifiers = Set<String>()
         for section in MenuBarSection.Name.allCases {
             for item in cache[section] where isPersistable(item) {
                 guard !pendingRehideTagIDs.contains(item.tag.tagIdentifier) else { continue }
                 guard !ejectedStillInHidden.contains(item.uniqueIdentifier) else { continue }
+                guard !refusedIdentifiers.contains(item.uniqueIdentifier) else { continue }
                 // Always track base identifier so stale saved entries for
                 // transient items (Live Activities) get pruned by the
                 // isStaleInstanceIndex guard below and not re-injected.
@@ -1126,7 +1151,8 @@ final class MenuBarItemManager {
                         !$0.isTransientControlCenterItem &&
                         !$0.hasProvisionalIdentity &&
                         !pendingRehideTagIDs.contains($0.tag.tagIdentifier) &&
-                        !ejectedStillInHidden.contains($0.uniqueIdentifier)
+                        !ejectedStillInHidden.contains($0.uniqueIdentifier) &&
+                        !refusedIdentifiers.contains($0.uniqueIdentifier)
                 }
                 .map(\.uniqueIdentifier)
 

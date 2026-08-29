@@ -254,7 +254,7 @@ extension MenuBarItemManager {
         return candidates.count == 1 ? candidates[0] : nil
     }
 
-    enum TriggerMoveResult: Equatable {
+    nonisolated enum TriggerMoveResult: Equatable {
         /// A synthetic move was performed and verified.
         case moved
         /// The item was already in the requested section.
@@ -433,11 +433,16 @@ extension MenuBarItemManager {
             )
             MenuBarItemManager.diagLog.info("moveItem(trigger): moved \(target.logString) to \(resolvedSection.logString)")
             return .moved
-        } catch EventError.inputPauseTimedOut, EventError.moveSuperseded {
+        } catch let error as EventError where Self.triggerMoveDeferral(for: error) != nil {
+            // Nothing was learned about the item: the user was still moving
+            // the mouse, the condition changed, a menu was open, or another
+            // move held the bar. Deferring re-evaluates shortly instead of
+            // holding the action for the failure backoff and showing
+            // "failed" for a move that was never attempted.
             MenuBarItemManager.diagLog.debug(
-                "moveItem(trigger): deferred stale or input-busy move for \(target.logString)"
+                "moveItem(trigger): deferred move for \(target.logString): \(error)"
             )
-            return .deferred
+            return Self.triggerMoveDeferral(for: error) ?? .deferred
         } catch {
             // A move can land and still throw: the verifier gives up on a
             // target it saw retreating while Control Center was only sliding

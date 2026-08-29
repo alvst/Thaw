@@ -344,6 +344,11 @@ final class LayoutBarPaddingView: NSView {
                 // down the user's interaction. This isn't a failure worth
                 // alerting on — log only.
                 Self.diagLog.info("Move deferred, a menu bar item menu was open")
+            } catch MenuBarItemManager.EventError.moveEngineBusy {
+                // Another move held the bar for the whole wait. Nothing was
+                // tried, so nothing failed; the editor snaps the item back
+                // and the user can drag again once the bar is free.
+                Self.diagLog.info("Move deferred, another move held the bar")
             } catch {
                 Self.diagLog.error("Error moving menu bar item: \(error)")
                 // The system event-driven move sometimes throws cannotComplete
@@ -428,7 +433,7 @@ final class LayoutBarPaddingView: NSView {
                             ),
                             appState: appState
                         )
-                        report.run(alert)
+                        report.run(alert, in: window)
                     }
                 case .alertControlItemsMissing:
                     let alert = NSAlert()
@@ -445,7 +450,7 @@ final class LayoutBarPaddingView: NSView {
                         ),
                         appState: appState
                     )
-                    report.run(alert)
+                    report.run(alert, in: window)
                 case .alertGeneric:
                     // Generated before the alert shows so the "Save Diagnostic
                     // Report…" button has the bar as it was at the failure,
@@ -459,7 +464,7 @@ final class LayoutBarPaddingView: NSView {
                         ),
                         appState: appState
                     )
-                    report.run(NSAlert(error: error))
+                    report.run(NSAlert(error: error), in: window)
                 }
             }
             if !revealedSections.isEmpty {
@@ -521,21 +526,49 @@ final class LayoutBarPaddingView: NSView {
         expectedSection: MenuBarSection.Name,
         cache: MenuBarItemManager.ItemCache
     ) -> Bool {
-        let sectionItems = cache[expectedSection]
-        guard let itemIndex = sectionItems.firstIndex(where: { $0.tag == item.tag }) else {
+        Self.itemReachedIntendedPosition(
+            item: item,
+            destination: destination,
+            sectionItems: cache[expectedSection]
+        )
+    }
+
+    /// Whether `item` sits in `sectionItems` where `destination` asked for
+    /// it. Pure, so the identity rule below can be tested.
+    static nonisolated func itemReachedIntendedPosition(
+        item: MenuBarItem,
+        destination: MenuBarItemManager.MoveDestination,
+        sectionItems: [MenuBarItem]
+    ) -> Bool {
+        guard let itemIndex = sectionItems.firstIndex(where: { Self.isSameItem($0, item) }) else {
             return false
         }
         let target = destination.targetItem
         if target.isControlItem {
             return true
         }
-        guard let targetIndex = sectionItems.firstIndex(where: { $0.tag == target.tag }) else {
+        guard let targetIndex = sectionItems.firstIndex(where: { Self.isSameItem($0, target) }) else {
             return false
         }
         return switch destination {
         case .leftOfItem: itemIndex + 1 == targetIndex
         case .rightOfItem: itemIndex == targetIndex + 1
         }
+    }
+
+    /// Whether a cached item is the item that was dragged.
+    ///
+    /// The dragged item's tag is a snapshot. The cache refreshed after the
+    /// move can name the same window differently — a provisional
+    /// `com.apple.controlcenter:Item-0` resolves to its app's identifier
+    /// once the source process is known — and an exact tag comparison then
+    /// misses the item that just landed, which re-drags it (the move engine
+    /// finds it already in place and cancels) and, on the failure path,
+    /// alerts for a move that worked. The window is what moved: match it
+    /// first, and fall back to the tag without its window for a window that
+    /// was recreated in between.
+    static nonisolated func isSameItem(_ cached: MenuBarItem, _ dragged: MenuBarItem) -> Bool {
+        cached.windowID == dragged.windowID || cached.tag.matchesIgnoringWindowID(dragged.tag)
     }
 
     @MainActor
@@ -770,7 +803,7 @@ final class LayoutBarPaddingView: NSView {
         await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true)
 
         func isInExpectedSection() -> Bool {
-            appState.itemManager.itemCache[expectedSection].contains { $0.tag == item.tag }
+            appState.itemManager.itemCache[expectedSection].contains { Self.isSameItem($0, item) }
         }
 
         if !isInExpectedSection() {

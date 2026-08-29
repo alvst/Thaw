@@ -630,74 +630,13 @@ extension MenuBarItemManager {
         )
     }
 
-    /// Offers a stranded divider a way out before an apply refuses on the
-    /// zero-width hidden section.
-    ///
-    /// The refusal is right in itself: a hidden section with no room between
-    /// the dividers is an untrustworthy reading, and planning against it
-    /// drags items to the wrong side of the bar (#868). But when the reason
-    /// there is no room is that H_ctrl has been pushed off every display, the
-    /// refusal is also what makes the strand permanent (#978). The apply
-    /// returns before Phase 1, the boundary mismatch is never computed, and
-    /// the recovery that would rebuild the divider never advances its streak.
-    /// #978's log caught the shape exactly: one launch produced 17
-    /// `parked offscreen` and 24 `zero width` warnings and not a single
-    /// `Phase 1:` line.
-    ///
-    /// So the guards still refuse — nothing plans against the bad reading —
-    /// but a stranded divider now counts the refusal, and a run of them
-    /// rebuilds it. The rebuild is withheld while a ⌘-drag is live, matching
-    /// the Phase 1 caller: replacing the window under an open drag session
-    /// strands the drag the same way the parked divider does.
-    func recoverStrandedHiddenDividerBeforeRefusing(
-        guardSource: String,
-        controlItems: ControlItemPair,
-        items: [MenuBarItem]
-    ) {
-        guard appState?.isDraggingMenuBarItem != true else { return }
-        _ = recoverParkedHiddenDividerIfNeeded(
-            trigger: .refusedApply(source: guardSource),
-            hiddenControlItem: controlItems.hidden,
-            // CGDisplayBounds shares the top-left origin space of the item
-            // bounds; NSScreen.frame does not.
-            screenFrames: NSScreen.screens.map { CGDisplayBounds($0.displayID) },
-            managedItemCount: items.count { item in
-                (item.canBeHidden || item.tag == .visibleControlItem)
-                    && item.isMovable
-                    && !item.isControlItem
-            }
-        )
-    }
-
     /// Persists the profile's pinning sets and saved section order to
     /// disk. Called from each applyProfileLayout success exit so the
     /// on-disk intent only commits once the bar reflects it. No-op for
     /// .savedOrder (that path doesn't overwrite either store).
-    ///
-    /// "Success" is the apply reaching an uncancelled exit, which is not the
-    /// same as the bar having taken the arrangement. An apply that plans
-    /// moves and fails to enact them still lands here, and this is the one
-    /// write to `savedSectionOrder` that never consulted
-    /// ``LayoutSolver/shouldPersistSavedOrder(_:)`` — so a bar whose drags
-    /// were failing had its wreckage committed while every gated save was
-    /// refusing for exactly that reason (#978). The section order is
-    /// withheld on an unfinished batch for the same reason the gated path
-    /// withholds it: recording a partial arrangement hands the next apply a
-    /// target it just moved, and the bar drifts further on every retry
-    /// (#900).
-    ///
-    /// The pinning sets are not withheld. They are the profile's own
-    /// declaration, not a reading of the bar, so a failed batch says nothing
-    /// about whether they are right.
     private func persistProfileStateOnSuccess(source: ApplySource) {
         guard case .profile = source else { return }
         persistPinnedBundleIDs()
-        guard !hasUnfinishedMoveBatch else {
-            MenuBarItemManager.diagLog.warning(
-                "Skipping the profile's saved section order write; the bulk apply left planned moves unenacted"
-            )
-            return
-        }
         persistSavedSectionOrder()
         // Committed: the pre-arm snapshot can no longer be rolled back to.
         priorProfileApplySnapshot = nil
@@ -796,7 +735,7 @@ extension MenuBarItemManager {
         // rewritten the next time the layout is persisted. Keyed maps are
         // migrated too, or the section lookup misses the renamed entry.
         let sectionOrder = LayoutSolver.canonicalizedSectionOrder(rawSectionOrder)
-        let itemOrder = LayoutSolver.canonicalizedSectionOrder(rawItemOrder)
+        let fullItemOrder = LayoutSolver.canonicalizedSectionOrder(rawItemOrder)
         let itemSectionMap = Dictionary(
             rawItemSectionMap.map { (LayoutSolver.canonicalIdentifier($0.key), $0.value) },
             uniquingKeysWith: { first, _ in first }
@@ -873,7 +812,7 @@ extension MenuBarItemManager {
             pinnedAlwaysHidden: pinnedAlwaysHidden,
             sectionOrder: sectionOrder,
             itemSectionMap: itemSectionMap,
-            itemOrder: itemOrder
+            itemOrder: fullItemOrder
         )
 
         // Token identifying this apply's ownership of the armed profile
@@ -893,7 +832,7 @@ extension MenuBarItemManager {
             isRestoringItemOrderTimestamp = nil
         }
 
-        guard !itemOrder.isEmpty else {
+        guard !fullItemOrder.isEmpty else {
             MenuBarItemManager.diagLog.debug("applyProfileLayout: no item order, skipping")
             concludeProfileApplyWithoutMoves(source: source, items: [])
             return
@@ -919,7 +858,7 @@ extension MenuBarItemManager {
         // items are discovered (since we need the ControlItemPair first).
         var desiredFlat = [String]()
         for key in ["visible", "hidden", "alwaysHidden"] {
-            if let order = itemOrder[key] {
+            if let order = fullItemOrder[key] {
                 desiredFlat.append(contentsOf: order)
             }
         }
@@ -932,6 +871,29 @@ extension MenuBarItemManager {
         // and reshuffling the bar. This fetch is independent of the cache
         // path, so it needs its own filter.
         items.removeAll(where: \.isSystemClone)
+
+        // Items a trigger owns right now are not this apply's to place. The
+        // saved-layout dispatch already stripped them from the desired order,
+        // but a stripped item then read as *unmanaged*, and Phase 3 placed it
+        // from the raw saved order regardless: in the field log the apply
+        // dragged a trigger's freshly revealed item back into its saved
+        // hidden slot twelve seconds after the reveal, the drag timed out,
+        // and the item's owner was marked unresponsive for it. Strip them
+        // from the planning order for both sources — the full spec still
+        // arms the profile state, so the slot is there to restore once the
+        // trigger releases the item — and keep them out of the unmanaged
+        // partition below.
+        let triggerOwnedUIDs = triggerOwnedUniqueIdentifiers(among: items)
+        let itemOrder = triggerOwnedUIDs.isEmpty
+            ? fullItemOrder
+            : fullItemOrder.mapValues { identifiers in
+                identifiers.filter { !triggerOwnedUIDs.contains($0) }
+            }
+        if !triggerOwnedUIDs.isEmpty {
+            MenuBarItemManager.diagLog.debug(
+                "applyProfileLayout: leaving \(triggerOwnedUIDs.count) trigger-owned item(s) alone: \(triggerOwnedUIDs.sorted())"
+            )
+        }
 
         // Skip the bulk apply while the majority of items have no resolved
         // sourcePID — uniqueIdentifier (used to match items against
@@ -1108,7 +1070,7 @@ extension MenuBarItemManager {
         // that an item is gone. Only the profile's own entries are sampled —
         // control items are always present and would dilute the ratio the
         // ledger uses to throw out a degraded pass.
-        let plannedIdentifiers = Set(itemOrder.values.joined())
+        let plannedIdentifiers = Set(fullItemOrder.values.joined())
         staleIdentifierLedger.recordApply(
             planned: plannedIdentifiers,
             matched: plannedIdentifiers.intersection(currentSet)
@@ -1138,7 +1100,8 @@ extension MenuBarItemManager {
             hiddenCtrlUID: hiddenCtrlUID,
             ahCtrlUID: ahCtrlUID,
             visibleCtrlUID: visibleCtrlUID,
-            provisionalIdentityUIDs: provisionalIdentityUIDs
+            // Trigger-owned items are left where the trigger put them.
+            provisionalIdentityUIDs: provisionalIdentityUIDs.union(triggerOwnedUIDs)
         )
         if !unmanagedUIDs.isEmpty {
             // Build a DesiredLayout for the profile-apply context: the
@@ -1355,11 +1318,6 @@ extension MenuBarItemManager {
             MenuBarItemManager.diagLog.warning(
                 "applyProfileLayout: skipping (savedOrder); hidden section has zero width between the dividers (hidden.minX=\(controlItems.hidden.bounds.minX) windowID=\(controlItems.hidden.windowID), alwaysHidden.maxX=\(controlItems.alwaysHidden?.bounds.maxX.description ?? "nil") windowID=\(controlItems.alwaysHidden?.windowID.description ?? "nil"))"
             )
-            recoverStrandedHiddenDividerBeforeRefusing(
-                guardSource: "applyProfileLayout",
-                controlItems: controlItems,
-                items: items
-            )
             clearProfileState(source: source, items: items)
             return
         }
@@ -1412,16 +1370,16 @@ extension MenuBarItemManager {
         // a control item is cheaper than moving individual items.
         var movedCount = 0
         var didAttemptHCtrl = false
-        // Set when a boundary repair carried items across H_ctrl instead of
-        // carrying H_ctrl across them. Either way the sections the AH_ctrl
-        // planning below reads are stale afterwards.
-        var didCrossHiddenBoundary = false
         var canRepositionControlItems = controlItems.canRepositionControlItems
         // Moves this batch planned for an item that is still on the bar and
         // then did not enact. Any of these leaves the bar in an arrangement
         // nobody asked for, which the saveSectionOrder gate must not treat
         // as an order of record (#900).
         var unenactedMoveCount = 0
+        // Moves macOS refused — the release put the item straight back. Not
+        // this batch's failure to finish: the item keeps its saved slot and
+        // is retried on a later pass. See `recordBulkApplyOutcome`.
+        var refusedMoveCount = 0
 
         /// Every abandon exits the same way: the abandoned remainder is one
         /// more unenacted move, the outcome feeds the circuit breaker, and
@@ -1435,9 +1393,26 @@ extension MenuBarItemManager {
                     "applyProfileLayout: \(reason); abandoning the remaining apply"
                 )
             }
-            recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount)
+            recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount, refusedMoveCount: refusedMoveCount)
             clearProfileState(source: source, items: items)
             scheduleDeferredCacheRefresh()
+        }
+
+        /// Books a failed move: a drop macOS refused is counted apart and
+        /// only backs the item off; anything else is unenacted and filed
+        /// against the owner only when the engine says the owner was silent.
+        func bookFailedMove(_ error: any Error, item: MenuBarItem, uid: String) {
+            if case EventError.dropReverted = error {
+                refusedMoveCount += 1
+                failureLedger.recordFailure(for: item, kind: .other)
+                MenuBarItemManager.diagLog.warning(
+                    "Profile layout: macOS refused to move \(uid); leaving it for a later pass"
+                )
+                return
+            }
+            unenactedMoveCount += 1
+            failureLedger.recordFailure(for: item, kind: ledgerFailureKind(for: error, item: item))
+            MenuBarItemManager.diagLog.error("Profile layout: failed to move \(uid): \(error)")
         }
 
         // Classify items into the two sets Phase 1 actually consults.
@@ -1501,44 +1476,14 @@ extension MenuBarItemManager {
         // divider-only divergence leaves current equal to desired and
         // plans no moves, and the apply reports "all items already in
         // correct positions" while the whole hidden section stays visible
-        // (#879). One H_ctrl move fixes every one of them...
-        let hiddenBoundaryOffenders = LayoutSolver.hiddenBoundaryOffenders(
+        // (#879). One H_ctrl move fixes every one of them.
+        let hiddenBoundaryMismatch = LayoutSolver.hiddenBoundaryMismatch(
             currentVisible: currentVisibleSet,
             currentHidden: currentHiddenSet,
             currentAlwaysHidden: currentAHSet,
             desiredVisible: desiredVisibleSet,
             desiredHidden: desiredHiddenSet,
-            desiredAlwaysHidden: desiredAHSet,
-            overflowExemptUIDs: notchOverflowEjectedUIDs
-        )
-        let hiddenBoundaryMismatch = hiddenBoundaryOffenders.count
-        // How many offenders the exemption absorbed this cycle, so a soak can
-        // tell a by-design divergence from one that would have been repaired.
-        // Equivalent to the unexempted tally minus this one: the solver only
-        // ever drops wronglyConcealed entries (an ejected item sits in
-        // hidden, never in desiredConcealed), and exempt ∩ currentHidden ⊆
-        // currentHidden ⊆ currentConcealed collapses the intersection.
-        // No feature gating here: Phase 4 above replaced or cleared the set
-        // under shouldManageNotchOverflow, so it is fresh for this apply.
-        let exemptedEjectedCount = notchOverflowEjectedUIDs.intersection(currentHiddenSet)
-            .intersection(desiredVisibleSet).count
-
-        // ...but only when it is the divider that drifted. isProfileItem
-        // admits the chevron, so the counts that decide this have to drop
-        // Thaw's own items first, or a collapsed bar always looks like it
-        // still has one item on the visible side and never qualifies for
-        // the drag that would rescue it.
-        let liveControlUIDs = Set(items.lazy.filter(\.isControlItem).map(\.uniqueIdentifier))
-        let liveConcealedCount = currentHiddenSet
-            .union(currentAHSet)
-            .subtracting(liveControlUIDs)
-            .count
-        let liveVisibleCount = currentVisibleSet
-            .subtracting(liveControlUIDs)
-            .count
-        let shouldMoveHiddenDivider = LayoutSolver.shouldMoveHiddenDivider(
-            liveConcealedCount: liveConcealedCount,
-            liveVisibleCount: liveVisibleCount
+            desiredAlwaysHidden: desiredAHSet
         )
 
         // Format contract: parsed by ProfileLayoutLogReplayTests.parse(_:).
@@ -1572,41 +1517,21 @@ extension MenuBarItemManager {
         MenuBarItemManager.diagLog.debug(
             "Profile layout Phase 1: hiddenBoundaryMismatch=\(hiddenBoundaryMismatch)"
         )
-        if exemptedEjectedCount > 0 {
-            MenuBarItemManager.diagLog.debug(
-                "Profile layout Phase 1: \(exemptedEjectedCount) notch-overflow-ejected item(s) exempt from the H_ctrl boundary check (by-design divergence)"
-            )
-        }
-        MenuBarItemManager.diagLog.debug(
-            "Profile layout Phase 1: liveConcealed=\(liveConcealedCount), liveVisible=\(liveVisibleCount), moveHiddenDivider=\(shouldMoveHiddenDivider)"
-        )
-        // A zero mismatch alone must not clear the streak. #978's divider
-        // stranded while the visible/hidden boundary was consistent —
-        // `hiddenBoundaryMismatch=0` on the very cycle that logged
-        // `parked offscreen` — so resetting here zeroed the counter on every
-        // pass and the recovery could never reach its threshold. Clear it
-        // only once the divider is demonstrably not stranded, using the same
-        // both-edges test the recovery arms on so the two agree about a
-        // healthy collapsed bar.
-        if hiddenBoundaryMismatch == 0,
-           !LayoutSolver.isFullyOffScreen(
-               bounds: controlItems.hidden.bounds,
-               screenFrames: NSScreen.screens.map { CGDisplayBounds($0.displayID) }
-           )
-        {
-            resetParkedHiddenDividerRecovery()
+        if hiddenBoundaryMismatch == 0 {
+            parkedHiddenDividerMismatchStreak = 0
+            didRecoverParkedHiddenDividerForCurrentMismatch = false
         }
 
-        // ── Sub-phase 1: Restore the visible/hidden boundary ──
+        // ── Sub-phase 1: Move H_ctrl to the visible/hidden boundary ──
         //
         // Runs before the AH_ctrl placement so the always-hidden planning
         // below sees a divider pair that already brackets the right set of
-        // items. Which way the repair runs is shouldMoveHiddenDivider's
-        // call: a drag that re-sections everything it crosses when the
-        // divider is what drifted, and per-item moves when it isn't.
+        // items. Both dividers move by the same mechanism: one drag that
+        // re-sections everything it crosses, which is why neither is left
+        // to the per-item LCS pass.
         if hiddenBoundaryMismatch > 0, canRepositionControlItems, !Task.isCancelled {
             MenuBarItemManager.diagLog.debug(
-                "Profile layout: \(hiddenBoundaryMismatch) item(s) on the wrong side of H_ctrl, moving \(shouldMoveHiddenDivider ? "H_ctrl to the boundary" : "them to H_ctrl")"
+                "Profile layout: \(hiddenBoundaryMismatch) item(s) on the wrong side of H_ctrl, moving H_ctrl to the boundary"
             )
 
             let allFreshItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
@@ -1628,26 +1553,11 @@ extension MenuBarItemManager {
             // is in AppKit's flipped coordinate space and can diverge for
             // mirrored or transitioning displays.
             let screenFrames = NSScreen.screens.map { CGDisplayBounds($0.displayID) }
-            // The recovery used to be reserved for .savedOrder applies
-            // (#978): profile-sourced applies — Layout-editor drags, ⌘-drag
-            // re-sorts — never reached it, so the streak could not advance on
-            // exactly the cycles where a user rearranging the bar kept
-            // displacing or exposing the stranded divider. Every apply source
-            // now feeds the recovery. Recreating the status item is still
-            // withheld while a ⌘-drag is live: replacing the window under an
-            // open drag session strands the drag the same way the parked
-            // divider does, and the next apply re-reads and re-counts.
-            if !appState.isDraggingMenuBarItem,
+            if case .savedOrder = source,
                recoverParkedHiddenDividerIfNeeded(
-                   trigger: .boundaryMismatch(hiddenBoundaryMismatch),
+                   hiddenBoundaryMismatch: hiddenBoundaryMismatch,
                    hiddenControlItem: freshControl.hidden,
-                   screenFrames: screenFrames,
-                   // Counted from the fresh read rather than the Phase 1 sets,
-                   // which are keyed by identifier and would fold items that
-                   // share one across displays into a single entry.
-                   managedItemCount: allFreshItems.count(where: {
-                       isProfileItem($0) && !$0.isControlItem
-                   })
+                   screenFrames: screenFrames
                )
             {
                 // Keep the prior unfinished-batch arm intact without counting
@@ -1657,230 +1567,99 @@ extension MenuBarItemManager {
                 scheduleDeferredCacheRefresh()
                 return
             }
-            if shouldMoveHiddenDivider {
-                // Exclude items parked off-screen from the anchor candidate set.
-                // A parked item falls on no screen; using it as the
-                // H_ctrl drag anchor makes the move fail every retry — AppKit
-                // snaps the divider back to its autosave position on mouse-up,
-                // one on-screen flicker per attempt for the full 8-attempt
-                // budget (#881: cursor seizure and icon storm). The per-item
-                // LCS pass handles repositioning parked items onto the bar.
-                let liveMovableUIDs = Set(
-                    allFreshItems.lazy.filter { item in
-                        guard item.isMovable, isProfileItem(item) else { return false }
-                        return LayoutSolver.isOnScreen(bounds: item.bounds, screenFrames: screenFrames)
-                    }.map(\.uniqueIdentifier)
-                )
-                // Thaw's own control items clear both filters above whatever the
-                // rest of the bar is doing: they are movable, and they stay on
-                // screen even on a pass where every real item the profile puts on
-                // this side of the divider has been dragged to the other side and
-                // parked. That leaves the chevron as the anchor of last resort in
-                // exactly the passes where the bar has diverged most, and dragging
-                // H_ctrl up to it collapses the section the apply was restoring
-                // (#958). The LCS pass below already bars them for the same
-                // reason (#924, #927).
-                let controlItemUIDs = Set(
-                    allFreshItems.lazy.filter(\.isControlItem).map(\.uniqueIdentifier)
-                )
-                let desiredHidden = itemOrder["hidden"] ?? []
-                let desiredVisible = itemOrder["visible"] ?? []
-                let anchor = LayoutSolver.planHiddenDividerAnchor(
-                    desiredHidden: desiredHidden,
-                    desiredVisible: desiredVisible,
-                    liveMovableUIDs: liveMovableUIDs,
-                    unanchorableUIDs: controlItemUIDs
-                )
+            // Exclude items parked off-screen from the anchor candidate set.
+            // A parked item's center falls on no screen; using it as the
+            // H_ctrl drag anchor makes the move fail every retry — AppKit
+            // snaps the divider back to its autosave position on mouse-up,
+            // one on-screen flicker per attempt for the full 8-attempt
+            // budget (#881: cursor seizure and icon storm). The per-item
+            // LCS pass handles repositioning parked items onto the bar.
+            let liveMovableUIDs = Set(
+                allFreshItems.lazy.filter { item in
+                    guard item.isMovable, isProfileItem(item) else { return false }
+                    return LayoutSolver.isOnScreen(bounds: item.bounds, screenFrames: screenFrames)
+                }.map(\.uniqueIdentifier)
+            )
+            let anchor = LayoutSolver.planHiddenDividerAnchor(
+                desiredHidden: itemOrder["hidden"] ?? [],
+                desiredVisible: itemOrder["visible"] ?? [],
+                liveMovableUIDs: liveMovableUIDs
+            )
 
-                if let anchor {
-                    let hItem = freshControl.hidden
-                    let anchorUID = switch anchor {
-                    case let .rightOf(uid), let .leftOf(uid): uid
-                    }
-                    if let anchorItem = allFreshItems.first(where: { $0.uniqueIdentifier == anchorUID }) {
-                        let dest: MoveDestination = switch anchor {
-                        case .rightOf: .rightOfItem(anchorItem)
-                        case .leftOf: .leftOfItem(anchorItem)
-                        }
-                        if !LayoutSolver.isOnScreen(bounds: hItem.bounds, screenFrames: screenFrames) {
-                            // The divider itself has to be on screen for the drag
-                            // to land. #881 excluded parked *anchors*; a parked
-                            // H_ctrl fails the same way from the other side — the
-                            // drag point is on screen so the owner accepts the
-                            // events, but AppKit still snaps the divider back to
-                            // its autosave position on mouse-up, and every attempt
-                            // reports "events succeeded but item not at
-                            // destination" for the full budget (#899). The
-                            // per-item LCS pass below repositions items without
-                            // needing the divider to travel.
-                            unenactedMoveCount += 1
-                            MenuBarItemManager.diagLog.warning(
-                                "Profile layout: H_ctrl is parked offscreen (minX=\(hItem.bounds.minX)), skipping the boundary move"
-                            )
-                        } else if failureLedger.isUnderBackoff(for: hItem) {
-                            // Same governance the per-item moves below already get.
-                            // Without it a boundary move that cannot land is retried
-                            // in full by every re-sort — eight drags a pass, a pass
-                            // every few seconds, for as long as the mismatch stands.
-                            // In #899 that ran until the user killed the app.
-                            unenactedMoveCount += 1
-                            MenuBarItemManager.diagLog.warning(
-                                "Profile layout: H_ctrl under move-failure backoff, skipping"
-                            )
-                        } else {
-                            MenuBarItemManager.diagLog.debug("Profile layout: moving H_ctrl → \(dest.logString)")
-                            didAttemptHCtrl = true
-                            do {
-                                try await move(item: hItem, to: dest, skipInputPause: true)
-                                movedCount += 1
-                                failureLedger.recordSuccess(for: hItem)
-                                try? await Task.sleep(for: .milliseconds(200))
-                            } catch {
-                                unenactedMoveCount += 1
-                                // A move cancelled by a newer apply says nothing
-                                // about the divider, and recording it would earn
-                                // H_ctrl a backoff window it did not deserve —
-                                // the same rule the LCS pass applies below.
-                                if Task.isCancelled {
-                                    MenuBarItemManager.diagLog.debug(
-                                        "Profile layout: H_ctrl move interrupted by a newer apply; leaving it unrecorded"
-                                    )
-                                } else {
-                                    if !Self.moveAlreadyFiledFailure(for: error) {
-                                        failureLedger.recordFailure(for: hItem, kind: Self.failureKind(of: error))
-                                    }
-                                    MenuBarItemManager.diagLog.error("Profile layout: failed to move H_ctrl: \(error)")
-                                }
-                            }
-                        }
-                    }
-                } else if let refusedAnchor = LayoutSolver.hiddenDividerAnchorCandidate(
-                    desiredHidden: desiredHidden,
-                    desiredVisible: desiredVisible,
-                    liveMovableUIDs: liveMovableUIDs
-                ).flatMap({ controlItemUIDs.contains($0) ? $0 : nil }) {
-                    // Separated from the case below so a soak can tell the two
-                    // apart: this one means the profile's items are on the bar
-                    // but on the wrong side of the divider, which is the state
-                    // the LCS pass fixes and this move used to make worse.
-                    MenuBarItemManager.diagLog.warning(
-                        "Profile layout: only \(refusedAnchor) was left to anchor the H_ctrl boundary move; leaving the divider where it is"
-                    )
-                } else {
-                    // No live movable member on either side to anchor against;
-                    // the LCS pass below still runs against whatever ordering
-                    // divergence remains.
-                    MenuBarItemManager.diagLog.warning(
-                        "Profile layout: no anchor available for the H_ctrl boundary move"
-                    )
-                }
-            } else if !LayoutSolver.isOnScreen(
-                bounds: freshControl.hidden.bounds,
-                screenFrames: screenFrames
-            ) {
-                // H_ctrl is the destination for every move the branch below
-                // would make, and a destination off the display gets a press
-                // at a point no owner is watching. #899 is the same failure
-                // seen from the divider's own side. recoverParkedHiddenDivider
-                // above rebuilds the divider once the mismatch persists; until
-                // then the LCS pass is the one that can make progress.
-                unenactedMoveCount += 1
-                MenuBarItemManager.diagLog.warning(
-                    "Profile layout: H_ctrl is parked offscreen (minX=\(freshControl.hidden.bounds.minX)), skipping the per-item boundary moves"
-                )
-            } else {
-                // The divider is roughly where it belongs and some items have
-                // wandered across it. Carry those items to the divider rather
-                // than the divider to them: the drag that would reach them
-                // re-sections every item it passes, and on a bar this close to
-                // correct that is most of the bar (#958).
+            if let anchor {
                 let hItem = freshControl.hidden
-                let offenderUIDs = hiddenBoundaryOffenders.wronglyVisible
-                    .union(hiddenBoundaryOffenders.wronglyConcealed)
-                var offenders: [String: MenuBarItem] = [:]
-                for item in allFreshItems where offenderUIDs.contains(item.uniqueIdentifier) {
-                    guard item.isMovable,
-                          LayoutSolver.isOnScreen(bounds: item.bounds, screenFrames: screenFrames)
-                    else {
-                        continue
-                    }
-                    offenders[item.uniqueIdentifier] = item
+                let anchorUID = switch anchor {
+                case let .rightOf(uid), let .leftOf(uid): uid
                 }
-                if offenders.count < offenderUIDs.count {
-                    // Parked or immovable. The LCS pass below is the one that
-                    // brings items back onto the bar; it also crosses the
-                    // boundary, just without a divider drag.
-                    MenuBarItemManager.diagLog.debug(
-                        "Profile layout: \(offenderUIDs.count - offenders.count) boundary offender(s) not live and movable, leaving them to the LCS pass"
-                    )
-                }
-
-                // Each move lands its item immediately beside H_ctrl and
-                // pushes the previous one further from it, so walking the
-                // group away from the divider preserves the order they were
-                // already in. Same reasoning as the notch-overflow eject.
-                let toConceal = hiddenBoundaryOffenders.wronglyVisible
-                    .compactMap { offenders[$0] }
-                    .sorted { $0.bounds.minX < $1.bounds.minX }
-                let toReveal = hiddenBoundaryOffenders.wronglyConcealed
-                    .compactMap { offenders[$0] }
-                    .sorted { $0.bounds.minX > $1.bounds.minX }
-
-                for (item, dest) in toConceal.map({ ($0, MoveDestination.leftOfItem(hItem)) })
-                    + toReveal.map({ ($0, MoveDestination.rightOfItem(hItem)) })
-                {
-                    if Task.isCancelled {
-                        break
+                if let anchorItem = allFreshItems.first(where: { $0.uniqueIdentifier == anchorUID }) {
+                    let dest: MoveDestination = switch anchor {
+                    case .rightOf: .rightOfItem(anchorItem)
+                    case .leftOf: .leftOfItem(anchorItem)
                     }
-                    guard !failureLedger.isUnderBackoff(for: item) else {
+                    if !LayoutSolver.isOnScreen(bounds: hItem.bounds, screenFrames: screenFrames) {
+                        // The divider itself has to be on screen for the drag
+                        // to land. #881 excluded parked *anchors*; a parked
+                        // H_ctrl fails the same way from the other side — the
+                        // drag point is on screen so the owner accepts the
+                        // events, but AppKit still snaps the divider back to
+                        // its autosave position on mouse-up, and every attempt
+                        // reports "events succeeded but item not at
+                        // destination" for the full budget (#899). The
+                        // per-item LCS pass below repositions items without
+                        // needing the divider to travel.
                         unenactedMoveCount += 1
-                        MenuBarItemManager.diagLog.debug(
-                            "Profile layout: \(item.logString) under move-failure backoff, skipping the boundary move"
+                        MenuBarItemManager.diagLog.warning(
+                            "Profile layout: H_ctrl is parked offscreen (minX=\(hItem.bounds.minX)), skipping the boundary move"
                         )
-                        continue
-                    }
-                    MenuBarItemManager.diagLog.debug(
-                        "Profile layout: moving \(item.logString) → \(dest.logString) to fix the H_ctrl boundary"
-                    )
-                    do {
-                        try await move(item: item, to: dest, skipInputPause: true)
-                        movedCount += 1
-                        didCrossHiddenBoundary = true
-                        failureLedger.recordSuccess(for: item)
-                        // Same settle the H_ctrl branch above grants itself:
-                        // each landed move re-sections the neighbours the
-                        // next iteration computes its target from, and a
-                        // drag issued against pre-move geometry lands where
-                        // the previous arrangement says it should.
-                        try? await Task.sleep(for: .milliseconds(200))
-                    } catch {
+                    } else if failureLedger.isUnderBackoff(for: hItem) {
+                        // Same governance the per-item moves below already get.
+                        // Without it a boundary move that cannot land is retried
+                        // in full by every re-sort — eight drags a pass, a pass
+                        // every few seconds, for as long as the mismatch stands.
+                        // In #899 that ran until the user killed the app.
                         unenactedMoveCount += 1
-                        // A move cancelled by a newer apply says nothing about
-                        // the item, and recording it would earn a backoff
-                        // window it did not deserve.
-                        if Task.isCancelled {
-                            MenuBarItemManager.diagLog.debug(
-                                "Profile layout: boundary move for \(item.logString) interrupted by a newer apply; leaving it unrecorded"
-                            )
-                        } else {
-                            if !Self.moveAlreadyFiledFailure(for: error) {
-                                failureLedger.recordFailure(for: item, kind: Self.failureKind(of: error))
+                        MenuBarItemManager.diagLog.warning(
+                            "Profile layout: H_ctrl under move-failure backoff, skipping"
+                        )
+                    } else {
+                        MenuBarItemManager.diagLog.debug("Profile layout: moving H_ctrl → \(dest.logString)")
+                        didAttemptHCtrl = true
+                        do {
+                            try await move(item: hItem, to: dest, skipInputPause: true)
+                            movedCount += 1
+                            failureLedger.recordSuccess(for: hItem)
+                            try? await Task.sleep(for: .milliseconds(200))
+                        } catch {
+                            // A move cancelled by a newer apply says nothing
+                            // about the divider, and recording it would earn
+                            // H_ctrl a backoff window it did not deserve —
+                            // the same rule the LCS pass applies below.
+                            if Task.isCancelled {
+                                unenactedMoveCount += 1
+                                MenuBarItemManager.diagLog.debug(
+                                    "Profile layout: H_ctrl move interrupted by a newer apply; leaving it unrecorded"
+                                )
+                            } else {
+                                bookFailedMove(error, item: hItem, uid: "H_ctrl")
                             }
-                            MenuBarItemManager.diagLog.error(
-                                "Profile layout: failed to move \(item.logString) across the H_ctrl boundary: \(error)"
-                            )
                         }
                     }
                 }
+            } else {
+                // No live movable member on either side to anchor against;
+                // the LCS pass below still runs against whatever ordering
+                // divergence remains.
+                MenuBarItemManager.diagLog.warning(
+                    "Profile layout: no anchor available for the H_ctrl boundary move"
+                )
             }
         }
 
-        // A boundary repair changes the section of everything that crossed,
-        // whether the divider moved or the items did. The snapshot used to
-        // decide the repair is therefore stale at this point; classify the
-        // post-move bounds again before deciding whether an AH_ctrl move
-        // (and its per-item fallback) is still warranted.
-        if didAttemptHCtrl || didCrossHiddenBoundary {
+        // Moving H_ctrl changes the section of every item it crosses. The
+        // snapshot used to decide the move is therefore stale at this point;
+        // classify the post-move bounds again before deciding whether an
+        // AH_ctrl move (and its per-item fallback) is still warranted.
+        if didAttemptHCtrl {
             var postMoveItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
             postMoveItems.removeAll(where: \.isSystemClone)
             var postMoveItemsCopy = postMoveItems
@@ -1966,24 +1745,11 @@ extension MenuBarItemManager {
                 items: &allFreshItemsCopy,
                 hiddenControlItemWindowID: hiddenWID,
                 alwaysHiddenControlItemWindowID: alwaysHiddenWID
-            ), freshControl.canRepositionControlItems
+            ), freshControl.canRepositionControlItems,
+            let ahItem = freshControl.alwaysHidden
             else {
                 abandonApply(
                     reason: "control items degraded before moving AH_ctrl",
-                    items: allFreshItems
-                )
-                return
-            }
-            // Post-#991 a nil here no longer means "resolution degraded": the
-            // pair recovers the divider from its own window when it merely
-            // dropped out of the enumerated list. Nil now means the window
-            // server no longer knows the authoritative ID at all — the status
-            // item was torn down or the section was disabled mid-apply — and
-            // every per-item destination below anchors on the divider, so the
-            // apply must not continue on it.
-            guard let ahItem = freshControl.alwaysHidden else {
-                abandonApply(
-                    reason: "always-hidden divider unresolved before moving AH_ctrl",
                     items: allFreshItems
                 )
                 return
@@ -2000,11 +1766,8 @@ extension MenuBarItemManager {
             // If hidden is empty, AH_ctrl goes next to H_ctrl.
             // If AH is empty, AH_ctrl also goes next to H_ctrl (no
             // boundary needed).
-            // CGDisplayBounds shares the top-left origin space of the item
-            // bounds; NSScreen.frame does not.
-            let ahScreenFrames = NSScreen.screens.map { CGDisplayBounds($0.displayID) }
             let desiredHiddenUIDs = itemOrder["hidden"] ?? []
-            var dest: MoveDestination? = if let firstHiddenUID = desiredHiddenUIDs.first,
+            let dest: MoveDestination? = if let firstHiddenUID = desiredHiddenUIDs.first,
                                             let firstHidden = allFreshItems.first(where: { $0.uniqueIdentifier == firstHiddenUID && $0.isMovable })
             {
                 // Place AH_ctrl to the LEFT of the rightmost hidden
@@ -2016,29 +1779,6 @@ extension MenuBarItemManager {
                 .leftOfItem(freshControl.hidden)
             }
 
-            // Never anchor on an offscreen destination. Anchoring beside a
-            // parked item drags AH_ctrl into the parked zone, which is how
-            // #978 acquired its second, worse fault: the AH_ctrl move
-            // targeted `left of ControlItem.Hidden` while H_ctrl sat at
-            // minX=-3596, the drag walked H_ctrl to -9322, and the pair came
-            // out inverted with the hidden section reading zero width. The
-            // reporter traced their strand to this path rather than to the
-            // visible/hidden boundary repair. Same reasoning as the Thaw-icon
-            // relocation guard in enforceControlItemOrder, and the same
-            // leading-edge test, which is the right one for a drag anchor.
-            //
-            // Refusing leaves AH_ctrl where it is and lets the per-item
-            // fallback below place items against it, which moves more items
-            // but strands nothing.
-            if let anchorBounds = dest?.targetItem.liveBounds,
-               !LayoutSolver.isOnScreen(bounds: anchorBounds, screenFrames: ahScreenFrames)
-            {
-                MenuBarItemManager.diagLog.warning(
-                    "Profile layout: skipping the AH_ctrl placement, its anchor is parked offscreen (minX=\(anchorBounds.minX)); moving AH_ctrl beside it would strand both"
-                )
-                dest = nil
-            }
-
             if let dest, !Task.isCancelled {
                 MenuBarItemManager.diagLog.debug("Profile layout: moving AH_ctrl → \(dest.logString)")
                 do {
@@ -2046,8 +1786,7 @@ extension MenuBarItemManager {
                     movedCount += 1
                     try? await Task.sleep(for: .milliseconds(200))
                 } catch {
-                    unenactedMoveCount += 1
-                    MenuBarItemManager.diagLog.error("Profile layout: failed to move AH_ctrl: \(error)")
+                    bookFailedMove(error, item: ahItem, uid: "AH_ctrl")
                 }
             }
 
@@ -2064,10 +1803,8 @@ extension MenuBarItemManager {
             // tells us which items still need to cross the boundary,
             // and dragging them explicitly to .leftOfItem(AH_ctrl)
             // or .rightOfItem(AH_ctrl) puts them on the correct
-            // side. The order these moves are issued in is the order
-            // the items come to rest in, so it has to be right here:
-            // the LCS pass below only re-sorts concealed sections when
-            // enforceConcealedSectionOrder is on, and it defaults off.
+            // side. The LCS within-section reorder pass below
+            // handles intra-section ordering.
             let freshItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
             var freshItemsCopy = freshItems
             if let freshControl = ControlItemPair(
@@ -2120,18 +1857,15 @@ extension MenuBarItemManager {
                     )
 
                     // Move items destined for AH (currently in hidden)
-                    // to the LEFT of AH_ctrl. Every move lands in the
-                    // slot immediately left of the divider, the
-                    // rightmost slot of always-hidden, and pushes the
-                    // items already there further left, so index 0 of
-                    // the saved order moves first and ends up furthest
-                    // left. See crossSectionFallbackMoveOrder.
+                    // to the LEFT of AH_ctrl. Iterate in reverse
+                    // profile order so the first item in
+                    // itemOrder["alwaysHidden"] (rightmost in AH per
+                    // profile convention, index 0) is moved last and
+                    // therefore lands closest to AH_ctrl, matching
+                    // the order LCS will leave it in.
                     let ahProfileOrder = itemOrder["alwaysHidden"] ?? []
-                    let orderedCrossToAH = LayoutSolver.crossSectionFallbackMoveOrder(
-                        profileOrder: ahProfileOrder,
-                        crossing: crossToAH,
-                        landingSlot: .rightmostOfAlwaysHidden
-                    )
+                    let orderedCrossToAH = ahProfileOrder.reversed().filter { crossToAH.contains($0) }
+                        + crossToAH.subtracting(ahProfileOrder).sorted()
                     for uid in orderedCrossToAH {
                         guard !Task.isCancelled else { break }
                         guard
@@ -2142,26 +1876,19 @@ extension MenuBarItemManager {
                             movedCount += 1
                             try? await Task.sleep(for: .milliseconds(100))
                         } catch {
-                            unenactedMoveCount += 1
-                            MenuBarItemManager.diagLog.error(
-                                "Profile layout: per-item move to AH failed for \(uid): \(error)"
-                            )
+                            bookFailedMove(error, item: item, uid: uid)
                         }
                     }
 
                     // Move items destined for hidden (currently in AH)
-                    // to the RIGHT of AH_ctrl. Every move lands in the
-                    // slot immediately right of the divider, the
-                    // leftmost slot of hidden, and pushes the items
-                    // already there further right, so index 0 of the
-                    // saved order moves last and ends up closest to
-                    // AH_ctrl. See crossSectionFallbackMoveOrder.
+                    // to the RIGHT of AH_ctrl. Iterate in profile
+                    // order so itemOrder["hidden"] index 0 (rightmost
+                    // in hidden = furthest from AH_ctrl) is moved
+                    // first and gets pushed furthest right by
+                    // subsequent moves.
                     let hiddenProfileOrder = itemOrder["hidden"] ?? []
-                    let orderedCrossToHidden = LayoutSolver.crossSectionFallbackMoveOrder(
-                        profileOrder: hiddenProfileOrder,
-                        crossing: crossToHidden,
-                        landingSlot: .leftmostOfHidden
-                    )
+                    let orderedCrossToHidden = hiddenProfileOrder.filter { crossToHidden.contains($0) }
+                        + crossToHidden.subtracting(hiddenProfileOrder).sorted()
                     for uid in orderedCrossToHidden {
                         guard !Task.isCancelled else { break }
                         guard
@@ -2172,10 +1899,7 @@ extension MenuBarItemManager {
                             movedCount += 1
                             try? await Task.sleep(for: .milliseconds(100))
                         } catch {
-                            unenactedMoveCount += 1
-                            MenuBarItemManager.diagLog.error(
-                                "Profile layout: per-item move to hidden failed for \(uid): \(error)"
-                            )
+                            bookFailedMove(error, item: item, uid: uid)
                         }
                     }
                 }
@@ -2276,7 +2000,7 @@ extension MenuBarItemManager {
             // pass has nothing left to plan: the divider is the boundary
             // that decides which section every item is in, so the sections
             // the cache reads back are not the ones this apply intended.
-            recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount)
+            recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount, refusedMoveCount: refusedMoveCount)
             concludeProfileApplyWithoutMoves(source: source, items: items)
             scheduleDeferredCacheRefresh()
             return
@@ -2289,6 +2013,7 @@ extension MenuBarItemManager {
         // Failures with no success between them; feeds moveBatchShouldAbandon.
         // Backoff skips do not count — they cost nothing and say nothing new.
         var consecutiveMoveFailures = 0
+        let refusedIdentifiers = refusedMoveIdentifiers()
 
         for (plannedIndex, planned) in plannedMoves.enumerated() {
             // A cancelled sequence is one a newer apply replaced, and that
@@ -2296,6 +2021,13 @@ extension MenuBarItemManager {
             // the one the gate should read. Leave the remainder uncounted.
             guard !Task.isCancelled else { break }
 
+            if refusedIdentifiers.contains(planned.uid) {
+                refusedMoveCount += 1
+                MenuBarItemManager.diagLog.info(
+                    "Profile layout: macOS refused to move \(planned.uid) recently, skipping"
+                )
+                continue
+            }
             if failureLedger.isUnderBackoff(key: planned.uid) {
                 unenactedMoveCount += 1
                 MenuBarItemManager.diagLog.warning(
@@ -2355,14 +2087,21 @@ extension MenuBarItemManager {
                     )
                     break
                 }
-                unenactedMoveCount += 1
-                consecutiveMoveFailures += 1
-                if !Self.moveAlreadyFiledFailure(for: error) {
-                    failureLedger.recordFailure(for: item, kind: Self.failureKind(of: error))
+                if case EventError.moveEngineBusy = error {
+                    // Another mover holds the bar; the remaining moves would
+                    // only queue behind it. Nothing here is the items' fault.
+                    unenactedMoveCount += plannedMoves.count - plannedIndex
+                    MenuBarItemManager.diagLog.warning(
+                        "Profile layout: another move holds the bar; abandoning the remaining \(plannedMoves.count - plannedIndex) move(s)"
+                    )
+                    break
                 }
-                MenuBarItemManager.diagLog.error(
-                    "Profile layout: failed to move \(planned.uid): \(error)"
-                )
+                if case EventError.dropReverted = error {
+                    bookFailedMove(error, item: item, uid: planned.uid)
+                    continue
+                }
+                consecutiveMoveFailures += 1
+                bookFailedMove(error, item: item, uid: planned.uid)
                 if Self.moveBatchShouldAbandon(consecutiveFailures: consecutiveMoveFailures) {
                     unenactedMoveCount += plannedMoves.count - plannedIndex - 1
                     MenuBarItemManager.diagLog.warning(
@@ -2375,7 +2114,7 @@ extension MenuBarItemManager {
 
         MenuBarItemManager.diagLog.info("Profile layout: completed with \(movedCount) move(s)")
 
-        recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount)
+        recordBulkApplyOutcome(unenactedMoveCount: unenactedMoveCount, refusedMoveCount: refusedMoveCount)
 
         // Last move has landed; nothing below touches the cursor.
         restoreCursor()
@@ -2415,6 +2154,29 @@ extension MenuBarItemManager {
         clearProfileState(source: source, items: items)
 
         scheduleDeferredCacheRefresh()
+    }
+
+    /// The unique identifiers among `items` whose placement a trigger owns.
+    ///
+    /// Matched the way `computeSectionOrder` and the divergence check match
+    /// them, so the three agree on which items the apply leaves alone.
+    func triggerOwnedUniqueIdentifiers(among items: [MenuBarItem]) -> Set<String> {
+        guard !triggerControlledItemIdentifiers.isEmpty else {
+            return []
+        }
+        let knownBaseIdentifiers = Set(items.map(\.tag.stableIdentifierBase))
+        let knownLiveIdentifiers = Set(items.map(\.uniqueIdentifier))
+        let controlledIdentifiers = triggerControlledItemIdentifiers
+        return Set(
+            items.map(\.uniqueIdentifier).filter { identifier in
+                Self.isTriggerProtected(
+                    identifier,
+                    by: controlledIdentifiers,
+                    knownBaseIdentifiers: knownBaseIdentifiers,
+                    knownLiveIdentifiers: knownLiveIdentifiers
+                )
+            }
+        )
     }
 
     /// Re-applies the user's saved menu-bar layout via the unified
@@ -2494,17 +2256,6 @@ extension MenuBarItemManager {
         return min(baseDelay * (1 << exponent), maxDelay)
     }
 
-    /// Whether repeated authoritative cache cycles should reset an
-    /// always-hidden divider that the feature enables but which does not
-    /// resolve, while the hidden divider resolves fine.
-    static nonisolated func shouldRecoverMissingAlwaysHiddenDivider(
-        consecutiveMissingReadings: Int,
-        alreadyRecovered: Bool = false,
-        threshold: Int = MenuBarItemManager.missingAlwaysHiddenDividerRecoveryThreshold
-    ) -> Bool {
-        !alreadyRecovered && consecutiveMissingReadings >= threshold
-    }
-
     /// Whether a persistent zero-width hidden span has enough trustworthy
     /// observations to reset the hidden divider once for this episode.
     static nonisolated func shouldRecoverCollapsedHiddenSection(
@@ -2523,177 +2274,6 @@ extension MenuBarItemManager {
         threshold: Int = MenuBarItemManager.parkedHiddenDividerRecoveryThreshold
     ) -> Bool {
         !alreadyRecovered && consecutiveMismatchReadings >= threshold
-    }
-
-    /// Whether a divider rebuild may also re-stamp the first-launch seed
-    /// position.
-    ///
-    /// Both rebuild paths exist to discard a stale autosave position, and both
-    /// discard it by writing the seed `preflightSetup` uses on a fresh install.
-    /// That value describes a bar Thaw has never arranged. Writing it onto a
-    /// bar that already holds managed items drops the rebuilt divider on one
-    /// side of all of them, and the next cache pass reads the entire bar into a
-    /// single section — the collapse `preflightSetup` documents for #895,
-    /// reached through the same guard-bypassing write that reopened it for
-    /// #890.
-    ///
-    /// #958's log is the direct evidence: one rebuild in five hours, and the
-    /// visible section goes from 12 items to 1 within three seconds of it,
-    /// while three earlier parkings that never rebuilt leave the bar intact.
-    ///
-    /// Skipping the stamp does not cost the recovery its purpose. Discarding
-    /// the old `NSStatusItem` is what gives the divider a window on the current
-    /// bar again; the follow-up apply the caller schedules is what walks it to
-    /// the saved boundary.
-    static nonisolated func canSeedRebuiltDividerPosition(managedItemCount: Int) -> Bool {
-        managedItemCount == 0
-    }
-
-    /// The stored `NSStatusItem` preferred positions of the three control
-    /// items, as a divider rebuild reads them back off `ControlItemDefaults`.
-    ///
-    /// Larger means further left: `ControlItem.preflightSetup` seeds the
-    /// visible item at 0 and the hidden divider at 1, and a healthy bar runs
-    /// `visible < hidden < alwaysHidden` reading right to left. `nil` means
-    /// nothing is stored for that item — the always-hidden divider has no
-    /// seed at all, and carries none while its section is disabled.
-    nonisolated struct StoredDividerPositions {
-        let visible: CGFloat?
-        let hidden: CGFloat?
-        let alwaysHidden: CGFloat?
-    }
-
-    /// Whether the stored hidden-divider position still describes a bar the
-    /// divider can be rebuilt onto.
-    ///
-    /// A rebuild that keeps the stored position is only safe while that
-    /// position orders the dividers correctly. #978's did not: macOS had
-    /// autosaved `hidden=6866` against `alwaysHidden=1034`, putting H_ctrl
-    /// left of AH_ctrl, which is the inversion that reads as a zero-width
-    /// hidden section. Restoring it on the next launch is why a relaunch
-    /// stopped clearing the strand — the app came up already stranded, first
-    /// layout line 0.4s after startup.
-    ///
-    /// Unknown bounds can't falsify the ordering, so they pass: the check
-    /// only reports an ordering it can actually see violated.
-    ///
-    /// Pure over its inputs.
-    static nonisolated func storedHiddenPositionIsOrdered(_ positions: StoredDividerPositions) -> Bool {
-        guard let hidden = positions.hidden else { return true }
-        if let visible = positions.visible, hidden <= visible {
-            return false
-        }
-        if let alwaysHidden = positions.alwaysHidden, hidden >= alwaysHidden {
-            return false
-        }
-        return true
-    }
-
-    /// A stored position to replace an inverted one with, or `nil` when the
-    /// neighbours give nothing to place the divider between.
-    ///
-    /// This restores *ordering*, not geometry. Dropping H_ctrl back between
-    /// the two chevrons is what gives the following apply a bar it can plan
-    /// against; walking the divider to the saved boundary is that apply's
-    /// job, exactly as it is for the empty-bar seed.
-    ///
-    /// Pure over its inputs.
-    static nonisolated func repairedHiddenDividerPosition(
-        _ positions: StoredDividerPositions
-    ) -> CGFloat? {
-        switch (positions.visible, positions.alwaysHidden) {
-        case let (visible?, alwaysHidden?):
-            // Both neighbours corrupt too — a midpoint would just pick a
-            // different wrong answer, so leave the stored value alone and let
-            // the always-hidden path report its own strand.
-            guard alwaysHidden > visible else { return nil }
-            return (visible + alwaysHidden) / 2
-        case let (visible?, nil):
-            return visible + 1
-        case let (nil, alwaysHidden?):
-            return alwaysHidden - 1
-        case (nil, nil):
-            return nil
-        }
-    }
-
-    /// What a divider rebuild should do with the stored preferred position.
-    nonisolated enum RebuiltDividerSeed: Equatable {
-        /// Stamp the value `ControlItem.preflightSetup` writes on a fresh
-        /// install. Only for a bar with no managed items.
-        case freshInstall(CGFloat)
-        /// Rebuild without touching the stored position.
-        case keepStored
-        /// Stamp a replacement because the stored position is inverted.
-        case repaired(CGFloat)
-
-        /// The value to hand `ControlItem.recreateStatusItem`, or `nil` to
-        /// leave the stored position alone.
-        var preferredPosition: CGFloat? {
-            switch self {
-            case let .freshInstall(position): position
-            case .keepStored: nil
-            case let .repaired(position): position
-            }
-        }
-    }
-
-    /// What a divider rebuild should stamp, given the bar it is rebuilding
-    /// onto and the positions currently on disk.
-    ///
-    /// Three outcomes, in order:
-    ///
-    /// - An empty bar takes the fresh-install seed, so it lands where a fresh
-    ///   install puts it.
-    /// - A populated bar whose stored position still orders the dividers
-    ///   keeps it, per ``canSeedRebuiltDividerPosition(managedItemCount:)``.
-    /// - A populated bar whose stored position is inverted takes a repaired
-    ///   one. Keeping an inverted position is what made #978 survive a
-    ///   relaunch: the rebuild logged "keeping its stored position", restored
-    ///   the value that stranded the divider, and re-entered the deadlock.
-    ///
-    /// Pure over its inputs.
-    static nonisolated func seedForRebuiltDivider(
-        managedItemCount: Int,
-        storedPositions: StoredDividerPositions
-    ) -> RebuiltDividerSeed {
-        if canSeedRebuiltDividerPosition(managedItemCount: managedItemCount) {
-            return .freshInstall(1)
-        }
-        guard !storedHiddenPositionIsOrdered(storedPositions),
-              let repaired = repairedHiddenDividerPosition(storedPositions)
-        else {
-            return .keepStored
-        }
-        return .repaired(repaired)
-    }
-
-    /// Reads the stored control item positions a divider rebuild plans
-    /// against.
-    @MainActor
-    static func currentStoredDividerPositions() -> StoredDividerPositions {
-        StoredDividerPositions(
-            visible: ControlItemDefaults[.preferredPosition, ControlItem.Identifier.visible.rawValue],
-            hidden: ControlItemDefaults[.preferredPosition, ControlItem.Identifier.hidden.rawValue],
-            alwaysHidden: ControlItemDefaults[
-                .preferredPosition,
-                ControlItem.Identifier.alwaysHidden.rawValue
-            ]
-        )
-    }
-
-    /// Log fragment naming what a divider rebuild did with the stored
-    /// position, so a field log says which branch ran without the reader
-    /// having to infer it from the collapse that follows.
-    static nonisolated func seedDescription(_ seed: RebuiltDividerSeed) -> String {
-        switch seed {
-        case let .freshInstall(position):
-            " at its seeded position (\(position))"
-        case .keepStored:
-            " and keeping its stored position (the bar holds managed items)"
-        case let .repaired(position):
-            " at a repaired position (\(position)); the stored one ordered H_ctrl outside its neighbours"
-        }
     }
 
     static nonisolated func baseIdentifier(forSavedIdentifier identifier: String) -> String {
@@ -3387,11 +2967,6 @@ extension MenuBarItemManager {
         guard hiddenSectionHasRoom else {
             MenuBarItemManager.diagLog.warning(
                 "applySavedLayout: skipping (\(trigger)); hidden section has zero width between the dividers (hidden.minX=\(controlItems.hidden.bounds.minX) windowID=\(controlItems.hidden.windowID), alwaysHidden.maxX=\(controlItems.alwaysHidden?.bounds.maxX.description ?? "nil") windowID=\(controlItems.alwaysHidden?.windowID.description ?? "nil"))"
-            )
-            recoverStrandedHiddenDividerBeforeRefusing(
-                guardSource: "applySavedLayout",
-                controlItems: controlItems,
-                items: items
             )
             return false
         }

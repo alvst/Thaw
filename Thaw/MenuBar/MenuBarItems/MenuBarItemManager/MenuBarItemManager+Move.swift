@@ -10,6 +10,7 @@ import Cocoa
 
 // @preconcurrency: see the note in MenuBarItemManager.swift.
 @preconcurrency import CoreGraphics
+import os.lock
 
 // MARK: - Moving Items
 
@@ -538,7 +539,8 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         destination: MoveDestination,
         on displayID: CGDirectDisplayID,
-        warpCursorAfter: Bool = true
+        warpCursorAfter: Bool = true,
+        releaseGuard: PressReleaseGuard? = nil
     ) async throws -> MoveEventsOutcome {
         var acquiredSemaphore = false
         do {
@@ -715,6 +717,9 @@ extension MenuBarItemManager {
             lastMoveOperationTimestamp = .now
         }
 
+        // From here the press is down; the guard releases it if nothing
+        // below does. See `PressReleaseGuard`.
+        releaseGuard?.arm()
         do {
             if let dragPlan {
                 itemOrigin = try await postFaithfulDragSteps(
@@ -1059,7 +1064,374 @@ extension MenuBarItemManager {
         }
     }
 
+    /// The longest a single move may run before it yields the bar.
+    ///
+    /// Every attempt is bounded by its press-release guard, but eight bounded
+    /// attempts still add up. The cursor watchdog gives up at ten seconds and
+    /// the callers waiting on `moveGate` at fifteen; stopping here keeps even
+    /// a slow move inside both, so one stuck item cannot take the bar away
+    /// from every other mover.
+    static nonisolated let moveDeadline: Duration = .seconds(8)
+
+    /// How long a press may stay down before ``PressReleaseGuard`` releases it.
+    ///
+    /// An attempt is a press, a wait for the item to follow it, two releases
+    /// and a wait for it to settle — five waits of `timeout` each when the
+    /// owner is slow. Six budgets is the whole attempt plus slack; the clamp
+    /// keeps a fast owner's guard from firing on a normal scheduling hiccup
+    /// and a slow owner's from waiting longer than the attempt itself.
+    static nonisolated func pressReleaseDeadline(for timeout: Duration) -> Duration {
+        (timeout * 6).clamped(min: .milliseconds(1500), max: .seconds(3))
+    }
+
+    /// The events a ``PressReleaseGuard`` posts.
+    ///
+    /// `CGEvent` is not `Sendable`. Posting one is thread-safe, the guard is
+    /// the only other holder, and nothing mutates the event after the guard
+    /// is armed, which is what the unchecked conformance asserts.
+    nonisolated struct PressReleaseEvents: @unchecked Sendable {
+        let mouseUp: CGEvent
+        let pid: pid_t
+    }
+
+    /// Releases a synthetic press that its attempt never released.
+    ///
+    /// A press that outlives its attempt leaves Control Center in a drag
+    /// session, and the next real click completes that drag wherever it
+    /// lands. Off the bar, that is the gesture that removes a status item.
+    /// It happened once in the field: a trigger's press at 13:15:47.680 was
+    /// released at 13:16:02.6, the mover's continuations having sat behind
+    /// a modal alert the whole time, and in between Control Center logged
+    /// "Completing drag by removing dragged object from menu bar". The item
+    /// was gone until its app was relaunched.
+    ///
+    /// The guard does not wait on anything the attempt waits on: it fires
+    /// from a dispatch timer on a global queue, posts the release directly
+    /// and records that it did. The attempt reads ``didFire`` afterwards and
+    /// reports itself as overrun instead of trusting a reply that arrived
+    /// after the release.
+    final nonisolated class PressReleaseGuard: Sendable {
+        private nonisolated struct Status {
+            var isArmed = false
+            var didFire = false
+        }
+
+        private let status = OSAllocatedUnfairLock(initialState: Status())
+        private let deadline: Duration
+        private let events: PressReleaseEvents
+        private let item: MenuBarItem
+
+        /// Creates a guard that is not yet counting. `move` builds it from the
+        /// destination alone, so it is independent of how the events that
+        /// perform the press are shaped; `postMoveEvents` arms it right
+        /// before it posts the first of them.
+        init(deadline: Duration, events: PressReleaseEvents, item: MenuBarItem) {
+            self.deadline = deadline
+            self.events = events
+            self.item = item
+        }
+
+        /// Starts the deadline. A second call does nothing.
+        func arm() {
+            let armed = status.withLock { status -> Bool in
+                guard !status.isArmed, !status.didFire else {
+                    return false
+                }
+                status.isArmed = true
+                return true
+            }
+            guard armed else {
+                return
+            }
+            let status = status
+            let events = events
+            let item = item
+            let milliseconds = max(1, Int(deadline.milliseconds))
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .milliseconds(milliseconds)) {
+                let fires = status.withLock { status -> Bool in
+                    guard status.isArmed else {
+                        return false
+                    }
+                    status.isArmed = false
+                    status.didFire = true
+                    return true
+                }
+                guard fires else {
+                    return
+                }
+                MenuBarItemManager.diagLog.warning(
+                    "Press on \(item.logString) outlived its \(milliseconds) ms deadline; releasing it"
+                )
+                events.mouseUp.post(to: .sessionEventTap)
+                events.mouseUp.post(to: .pid(events.pid))
+            }
+        }
+
+        /// Whether the guard released the press.
+        var didFire: Bool {
+            status.withLock(\.didFire)
+        }
+
+        /// Stops the guard from firing. Idempotent; a guard that already
+        /// fired stays fired.
+        func disarm() {
+            status.withLock { $0.isArmed = false }
+        }
+    }
+
+    /// The guard for one attempt's press, or `nil` when no release event can
+    /// be built (the guard is a safety net, not a precondition).
+    ///
+    /// The release is a plain mouse-up at the drop point stamped with the
+    /// target's window, which is what every drag strategy ends with; the
+    /// process it goes to is the one the attempt's own events go to.
+    private func makePressReleaseGuard(
+        for item: MenuBarItem,
+        destination: MoveDestination,
+        on displayID: CGDirectDisplayID
+    ) async -> PressReleaseGuard? {
+        guard
+            let targetBounds = try? await getCurrentBounds(for: destination.targetItem),
+            let source = try? getEventSource(),
+            let mouseUp = CGEvent.menuBarItemEvent(
+                item: destination.targetItem,
+                source: source,
+                type: .move(.mouseUp),
+                location: destination.targetPoint(in: targetBounds, on: CGDisplayBounds(displayID))
+            )
+        else {
+            MenuBarItemManager.diagLog.warning(
+                "No release event could be built for \(item.logString); the press runs unguarded"
+            )
+            return nil
+        }
+        return PressReleaseGuard(
+            deadline: Self.pressReleaseDeadline(for: getMoveOperationTimeout(for: item)),
+            events: PressReleaseEvents(mouseUp: mouseUp, pid: getEventPID(for: item)),
+            item: item
+        )
+    }
+
+    /// Whether the item's window is owned by Control Center, which on macOS
+    /// 26 hosts every status item and is where its move events are posted.
+    private static func isControlCenterOwned(_ item: MenuBarItem) -> Bool {
+        item.owningApplication?.bundleIdentifier == MenuBarItemTag.Namespace.controlCenter.description
+    }
+
+    /// How the failure ledger files `error` for `item`.
+    ///
+    /// See ``ledgerFailureKind(for:ownerIsControlCenter:hasProvisionalIdentity:)``
+    /// for the rule; this supplies the live inputs.
+    func ledgerFailureKind(for error: any Error, item: MenuBarItem) -> MenuBarItemFailureLedger.FailureKind {
+        guard let error = error as? EventError else {
+            return .other
+        }
+        return Self.ledgerFailureKind(
+            for: error,
+            ownerIsControlCenter: Self.isControlCenterOwned(item),
+            hasProvisionalIdentity: item.hasProvisionalIdentity
+        )
+    }
+
+    // MARK: - Refused moves
+
+    /// Records that macOS put `item` straight back after every release.
+    ///
+    /// While the record stands, `computeSectionOrder` keeps the item's saved
+    /// slot instead of persisting wherever the refusal left it, and the bulk
+    /// apply counts a skip of the item as refused rather than as a batch it
+    /// failed to finish. Cleared by a landing or by `refusedMoveLifetime`.
+    func noteRefusedMove(of item: MenuBarItem) {
+        macOSRefusedMoves[item.uniqueIdentifier] = .now
+    }
+
+    /// Forgets a refusal because the item just landed.
+    func clearRefusedMove(of item: MenuBarItem) {
+        macOSRefusedMoves[item.uniqueIdentifier] = nil
+    }
+
+    /// The identifiers whose most recent move macOS refused, with expired
+    /// records dropped on the way out.
+    func refusedMoveIdentifiers(now: ContinuousClock.Instant = .now) -> Set<String> {
+        macOSRefusedMoves = macOSRefusedMoves.filter { entry in
+            Self.refusedMoveIsCurrent(recordedAt: entry.value, now: now)
+        }
+        return Set(macOSRefusedMoves.keys)
+    }
+
+    /// Files a verified landing: the ledger forgets the item and so does the
+    /// refused-move record.
+    private func recordLanding(of item: MenuBarItem) {
+        failureLedger.recordSuccess(for: item)
+        clearRefusedMove(of: item)
+    }
+
+    /// The error a stopped move throws, so every caller keeps seeing the
+    /// `EventError` it already handles.
+    static nonisolated func moveError(
+        for reason: MovePolicy.StopReason,
+        item: MenuBarItem,
+        lastError: (any Error)?
+    ) -> any Error {
+        switch reason {
+        case .refusedByMacOS:
+            EventError.dropReverted(item)
+        case .targetMoved, .targetRetreating:
+            EventError.staleDestination(item)
+        case .ownerUnresponsive:
+            EventError.ownerUnresponsive(item)
+        case .itemGone:
+            EventError.missingItemBounds(item)
+        case .superseded:
+            EventError.moveSuperseded(item)
+        case .overran:
+            EventError.moveTimedOut(item)
+        case .ownerAlwaysSilent, .ownerSilent, .other:
+            (lastError as? EventError) ?? EventError.cannotComplete
+        case .budgetExhausted:
+            EventError.cannotComplete
+        }
+    }
+
+    /// Logs why a move stopped, in the words the field logs are grepped for.
+    private func logStop(
+        _ reason: MovePolicy.StopReason,
+        attempt: Int,
+        item: MenuBarItem,
+        destination: MoveDestination,
+        state: MovePolicy.State,
+        maxAttempts: Int,
+        error: (any Error)?
+    ) {
+        let target = destination.targetItem
+        switch reason {
+        case .refusedByMacOS:
+            MenuBarItemManager.diagLog.warning(
+                "Attempt \(attempt): \(item.logString) was put back at its starting origin on every release; abandoning the move"
+            )
+        case .targetMoved:
+            let planned = state.plannedTargetMinX.map { String(format: "%.0f", $0) } ?? "?"
+            let current = state.latestTargetMinX.map { String(format: "%.0f", $0) } ?? "?"
+            MenuBarItemManager.diagLog.warning(
+                """
+                Attempt \(attempt): \(target.logString) moved from \
+                minX=\(planned) to minX=\(current) \
+                during the drag, abandoning the stale move
+                """
+            )
+        case .targetRetreating:
+            let history = state.targetMinXHistory.map { String(format: "%.0f", $0) }.joined(separator: " → ")
+            MenuBarItemManager.diagLog.warning(
+                """
+                Attempt \(attempt): \(target.logString) has retreated on every \
+                recent attempt (minX \(history)) \
+                while \(item.logString) did not land; abandoning rather than pushing it further
+                """
+            )
+        case .ownerUnresponsive:
+            MenuBarItemManager.diagLog.warning(
+                "Attempt \(attempt): \(item.logString) owner is unresponsive, aborting move"
+            )
+        case .ownerAlwaysSilent:
+            MenuBarItemManager.diagLog.warning(
+                "Attempt \(attempt): \(item.logString) failed the way it always does, aborting move"
+            )
+        case .ownerSilent, .other:
+            MenuBarItemManager.diagLog.debug(
+                "Attempt \(attempt) failed: \(error.map { "\($0)" } ?? "unknown error")"
+            )
+        case .itemGone:
+            MenuBarItemManager.diagLog.warning(
+                "Attempt \(attempt): \(item.logString) no longer reports bounds, aborting move"
+            )
+        case .superseded:
+            MenuBarItemManager.diagLog.debug(
+                "move: superseded during attempt \(attempt) for \(item.logString)"
+            )
+        case .overran:
+            MenuBarItemManager.diagLog.warning(
+                "Attempt \(attempt): the press on \(item.logString) outlived its deadline and was released; stopping the move"
+            )
+        case .budgetExhausted:
+            MenuBarItemManager.diagLog.debug("Attempt \(attempt) events succeeded but item not at destination")
+            MenuBarItemManager.diagLog.error(
+                "move: all \(maxAttempts) attempt(s) exhausted without verifying \(item.logString) reached \(destination.logString)"
+            )
+        }
+    }
+
+    /// Whether `item` sits beside the destination's target right now, with a
+    /// failed reading counting as "not there": the final check must never
+    /// turn a failure verdict into a thrown enumeration error.
+    private func isAtDestination(
+        _ item: MenuBarItem,
+        for destination: MoveDestination,
+        on displayID: CGDirectDisplayID
+    ) async -> Bool {
+        do {
+            return try await itemHasCorrectPosition(item: item, for: destination, on: displayID)
+        } catch {
+            MenuBarItemManager.diagLog.debug(
+                "Final landing check for \(item.logString) could not read the bar: \(error)"
+            )
+            return false
+        }
+    }
+
+    /// Ends a move that stopped short of a verified landing.
+    ///
+    /// Where the item could still be at the destination, the settled bar is
+    /// asked before anything is reported: a verifier that gave up on a target
+    /// Control Center was only sliding into place used to report a landed
+    /// move as a failure (every one of the 28 trigger reveals that "failed"
+    /// in one field log). Then the failure is filed where it belongs and the
+    /// verdict is logged and thrown.
+    private func concludeFailedMove(
+        reason: MovePolicy.StopReason,
+        item: MenuBarItem,
+        destination: MoveDestination,
+        on displayID: CGDirectDisplayID,
+        attempts: Int,
+        startedAt: ContinuousClock.Instant,
+        lastError: (any Error)?
+    ) async throws {
+        if reason.deservesFinalLandingCheck {
+            await waitForLayoutToSettle(item: item, target: destination.targetItem)
+            if await isAtDestination(item, for: destination, on: displayID) {
+                MenuBarItemManager.diagLog.info(
+                    "Move landed: \(item.logString) after \(attempts) attempt(s); confirmed against the settled bar after stopping for \(reason.logString)"
+                )
+                recordLanding(of: item)
+                return
+            }
+        }
+        if reason == .budgetExhausted {
+            // Run the stuck-item validator (recovers x=-1 blocks) before
+            // telling the caller the item did not reach the destination.
+            await validateItemPositionAfterMove(item: item, destination: destination, on: displayID)
+        }
+        if reason == .refusedByMacOS {
+            noteRefusedMove(of: item)
+        }
+        if reason.isFiledAgainstOwner, let lastError {
+            failureLedger.recordFailure(for: item, kind: ledgerFailureKind(for: lastError, item: item))
+        }
+        let elapsed = ContinuousClock.now - startedAt
+        MenuBarItemManager.diagLog.info(
+            "Move verdict: \(reason.logString) for \(item.logString) after \(attempts) attempt(s) in \(Int(elapsed.milliseconds)) ms"
+        )
+        throw Self.moveError(for: reason, item: item, lastError: lastError)
+    }
+
     /// Moves a menu bar item to the given destination.
+    ///
+    /// The attempt loop is driven by ``MovePolicy``: each attempt yields one
+    /// observation, the policy decides whether to retry or stop and why, and
+    /// the reason it stops for is what the thrown error and the logged
+    /// verdict report. Every verdict except a refused drop, a vanished item,
+    /// a hung owner or a superseded move is checked against the settled bar
+    /// before it is thrown, so a move that landed is never reported as a
+    /// failure.
     ///
     /// - Parameters:
     ///   - item: The menu bar item to move.
@@ -1082,10 +1454,13 @@ extension MenuBarItemManager {
             do {
                 try await Self.moveGate.wait(timeout: Self.moveGateTimeout)
             } catch is SimpleSemaphore.TimeoutError {
+                // Not a verdict about the item: another move held the bar for
+                // the whole wait. Callers treat it as a deferral, not a
+                // failure to file against the item.
                 MenuBarItemManager.diagLog.error(
                     "move: another move has held the bar for \(Self.moveGateTimeout); giving up on \(item.logString)"
                 )
-                throw EventError.cannotComplete
+                throw EventError.moveEngineBusy(item)
             }
             defer {
                 Task.detached { await Self.moveGate.signal() }
@@ -1245,37 +1620,24 @@ extension MenuBarItemManager {
             }
         }
 
-        // Tracks whether any postMoveEvents attempt produced observable
-        // displacement. Only consulted on retries when the item being
-        // moved is a zero-width control item (section divider), where
-        // a position match can coincide with bounds drifting onto the
-        // target externally; ordinary items skip this gate.
-        var anyMoveEventsSucceeded = false
-
-        // Consecutive attempts whose release put the item straight back at
-        // its starting origin. See `EventError.dropReverted`.
-        var revertedAttempts = 0
-
-        // Baseline for the stale-plan check in the retry path. The destination
-        // was chosen against the bar as it looked when this move was planned;
-        // if the target itself travels a long way while we are dragging, the
-        // plan describes an arrangement that no longer exists.
+        // Baseline for the stale-plan check. The destination was chosen
+        // against the bar as it looked when this move was planned; if the
+        // target itself travels a long way while we are dragging, the plan
+        // describes an arrangement that no longer exists.
         let plannedTargetBounds = try? await getCurrentBounds(for: destination.targetItem)
+        var policyState = MovePolicy.State(plannedTargetMinX: plannedTargetBounds?.minX)
+        let configuration = MovePolicy.Configuration(
+            maxAttempts: max(1, maxMoveAttempts),
+            displayWidth: CGDisplayBounds(resolvedDisplayID).width,
+            itemIsControlItem: item.isControlItem,
+            ownerHasSilentRecord: failureLedger.isUnresponsive(item)
+        )
+        let startedAt = ContinuousClock.now
+        var lastError: (any Error)?
+        var stopReason: MovePolicy.StopReason?
 
-        // Where the target has sat at the end of each failed attempt. A
-        // single nudge is expected; a run of them in one direction is the
-        // move pushing its own anchor. See `targetIsRetreating`.
-        var targetMinXHistory: [CGFloat] = plannedTargetBounds.map { [$0.minX] } ?? []
-
-        let maxAttempts = max(1, maxMoveAttempts)
-        for n in 1 ... maxAttempts {
-            var attemptMouseLocation: CGPoint?
-            defer {
-                if let attemptMouseLocation {
-                    MouseHelpers.restoreCursorPosition(to: attemptMouseLocation)
-                    MouseHelpers.showCursor()
-                }
-            }
+        attemptLoop: while stopReason == nil {
+            let n = policyState.attempts + 1
             guard !Task.isCancelled else {
                 MenuBarItemManager.diagLog.debug("move: cancelled before attempt \(n) for \(item.logString)")
                 throw EventError.cannotComplete
@@ -1284,14 +1646,33 @@ extension MenuBarItemManager {
                 MenuBarItemManager.diagLog.debug("move: superseded before attempt \(n) for \(item.logString)")
                 throw EventError.moveSuperseded(item)
             }
+            let elapsed = ContinuousClock.now - startedAt
+            guard MovePolicy.mayStartAnotherAttempt(elapsed: elapsed, deadline: Self.moveDeadline) else {
+                MenuBarItemManager.diagLog.warning(
+                    "move: \(item.logString) has been moving for \(Int(elapsed.milliseconds)) ms; not starting attempt \(n)"
+                )
+                stopReason = .overran
+                break attemptLoop
+            }
+
+            var attemptMouseLocation: CGPoint?
+            defer {
+                if let attemptMouseLocation {
+                    MouseHelpers.restoreCursorPosition(to: attemptMouseLocation)
+                    MouseHelpers.showCursor()
+                }
+            }
+
+            let observation: MovePolicy.Observation
+            var releaseGuard: PressReleaseGuard?
+            var attemptStrategy: MoveStrategy?
             do {
                 if try await itemHasCorrectPosition(item: item, for: destination, on: resolvedDisplayID) {
-                    // On the first iteration trust the position match
-                    // unconditionally. On retries, the only case where the
-                    // match can be a coincidence is when the item being
-                    // moved is itself a zero-width control item; gate
-                    // those on observed displacement, accept all others.
-                    if n == 1 || anyMoveEventsSucceeded || !item.isControlItem {
+                    if MovePolicy.trustsPositionMatch(
+                        attempt: n,
+                        anyEventsSucceeded: policyState.anyEventsSucceeded,
+                        itemIsControlItem: item.isControlItem
+                    ) {
                         MenuBarItemManager.diagLog.debug("Item has correct position, finished with move")
                         return
                     }
@@ -1303,45 +1684,31 @@ extension MenuBarItemManager {
                     attemptMouseLocation = try getMouseLocation()
                     MouseHelpers.hideCursor(watchdogTimeout: watchdogTimeout ?? .seconds(2))
                 }
+                // The press must be released whatever happens to the waits
+                // inside `postMoveEvents`. See `PressReleaseGuard`.
+                releaseGuard = await makePressReleaseGuard(for: item, destination: destination, on: resolvedDisplayID)
                 let outcome = try await postMoveEvents(
                     item: item,
                     destination: destination,
                     on: resolvedDisplayID,
-                    warpCursorAfter: false // move() owns the single warp in its defer
+                    warpCursorAfter: false, // move() owns the single warp in its defer
+                    releaseGuard: releaseGuard
                 )
-                let attemptTimeout = outcome.timeout
-                // postMoveEvents only returns without throwing when both
-                // waitForMoveEventResponse calls observed origin changes,
-                // i.e. our drag actually displaced the item.
-                anyMoveEventsSucceeded = true
+                attemptStrategy = outcome.strategy
+                releaseGuard?.disarm()
+                if releaseGuard?.didFire == true {
+                    // A reply that arrived after the guard released the press
+                    // describes a press that was no longer down.
+                    throw EventError.moveTimedOut(item)
+                }
                 // Judge the landing against the bar as it will stay, not
                 // mid-animation. See `waitForLayoutToSettle`.
                 await waitForLayoutToSettle(item: item, target: destination.targetItem)
-                // Verify the item actually reached the correct position.
                 let landedOnDestination = try await itemHasCorrectPosition(
                     item: item,
                     for: destination,
                     on: resolvedDisplayID
                 )
-                // A release that puts the item straight back where it started
-                // is Control Center restoring the item's autosaved slot: the
-                // source app never registered the drop. Every press variant
-                // tried in the field — in the notch, on screen with the
-                // cursor warped — reverted the same way for minutes and the
-                // state then cleared by itself, so further attempts only
-                // cost time. Two in a row rule out a one-off nudge, the
-                // warm-up press #881 documents.
-                if !landedOnDestination, outcome.revertedToStart {
-                    revertedAttempts += 1
-                    if revertedAttempts >= 2 {
-                        MenuBarItemManager.diagLog.warning(
-                            "Attempt \(n): \(item.logString) was put back at its starting origin on every release; abandoning the move"
-                        )
-                        throw EventError.dropReverted(item)
-                    }
-                } else {
-                    revertedAttempts = 0
-                }
                 // `postMoveEvents` only observes displacement. Let this
                 // single post-event landing check decide whether the next
                 // attempt earns a shorter budget or keeps it unchanged;
@@ -1349,157 +1716,82 @@ extension MenuBarItemManager {
                 // successful moves (#889).
                 updateMoveOperationTimeout(
                     Self.nextMoveOperationTimeout(
-                        after: attemptTimeout,
+                        after: outcome.timeout,
                         outcome: landedOnDestination ? .landed : .displacedWithoutLanding
                     ),
                     for: item
                 )
                 if landedOnDestination {
-                    // Logged at info so the warm-up attempt cost can be read
-                    // straight off a field log: grep "Move landed" and compare
-                    // the attempt counts.
-                    MenuBarItemManager.diagLog.info(
-                        "Move landed: \(item.logString) after \(n) attempt(s) via \(outcome.strategy)"
+                    observation = .landed
+                } else {
+                    let currentTargetBounds = try? await getCurrentBounds(for: destination.targetItem)
+                    observation = .displaced(
+                        revertedToStart: outcome.revertedToStart,
+                        targetMinX: currentTargetBounds?.minX
                     )
-                    MenuBarItemManager.diagLog.debug("Attempt \(n) succeeded and verified, finished with move")
-                    failureLedger.recordSuccess(for: item)
-                    // Validate that item didn't get stuck when moving to hidden section
-                    await validateItemPositionAfterMove(item: item, destination: destination, on: resolvedDisplayID)
-                    return
                 }
-                // Retrying against a target that has already moved re-plans
-                // each attempt against different geometry and drags the item
-                // somewhere new every time, which is what leaves a failed
-                // batch with a fresh partial arrangement on every pass (#900).
-                // Stop instead and let the next cache tick re-plan against a
-                // settled bar.
-                let currentTargetBounds = try? await getCurrentBounds(for: destination.targetItem)
-                if let currentTargetBounds {
-                    targetMinXHistory.append(currentTargetBounds.minX)
-                }
-                if let plannedTargetBounds,
-                   let currentTargetBounds,
-                   Self.destinationIsStale(
-                       plannedTargetMinX: plannedTargetBounds.minX,
-                       currentTargetMinX: currentTargetBounds.minX,
-                       displayWidth: CGDisplayBounds(resolvedDisplayID).width
-                   )
-                {
-                    MenuBarItemManager.diagLog.warning(
-                        """
-                        Attempt \(n): \(destination.targetItem.logString) moved from \
-                        minX=\(plannedTargetBounds.minX) to minX=\(currentTargetBounds.minX) \
-                        during the drag, abandoning the stale move
-                        """
-                    )
-                    throw EventError.staleDestination(item)
-                }
-                // Small steps that never trip the stale threshold still walk
-                // the anchor across the bar if they all go the same way, and
-                // when the anchor is one of Thaw's dividers that ends in a
-                // zero-width hidden section (#924, #927). Stop and let the
-                // next cache tick re-plan against a settled bar.
-                if Self.targetIsRetreating(recentTargetMinX: targetMinXHistory) {
-                    MenuBarItemManager.diagLog.warning(
-                        """
-                        Attempt \(n): \(destination.targetItem.logString) has retreated on every \
-                        recent attempt (minX \(targetMinXHistory.map { String(format: "%.0f", $0) }.joined(separator: " → "))) \
-                        while \(item.logString) did not land; abandoning rather than pushing it further
-                        """
-                    )
-                    throw EventError.staleDestination(item)
-                }
-                MenuBarItemManager.diagLog.debug("Attempt \(n) events succeeded but item not at destination, retrying")
-                if n < maxAttempts {
-                    guard shouldProceed?() ?? true else {
-                        throw EventError.moveSuperseded(item)
-                    }
-                    try await waitForMoveOperationBuffer()
-                    continue
-                }
+            } catch let error as EventError {
+                releaseGuard?.disarm()
+                lastError = error
+                // The overrun is the truthful outcome once the guard has
+                // fired, whatever the attempt threw after it; it is not the
+                // owner's silence.
+                observation = .failed(
+                    releaseGuard?.didFire == true ? .overran : MovePolicy.attemptFailure(for: error)
+                )
             } catch {
-                // missingItemBounds is definitive: getCurrentBounds already
-                // refreshed the on-screen items and re-matched by tag before
-                // throwing, so the item's window is genuinely gone (transient
-                // Control Center item vanished, owning app quit). Retrying
-                // just warps the hidden cursor into the menu bar once per
-                // remaining attempt for an item that cannot be moved (#736).
-                if case EventError.missingItemBounds = error {
-                    MenuBarItemManager.diagLog.warning(
-                        "Attempt \(n): \(item.logString) no longer reports bounds, aborting move"
+                releaseGuard?.disarm()
+                lastError = error
+                observation = .failed(releaseGuard?.didFire == true ? .overran : .other)
+            }
+
+            switch MovePolicy.decide(after: observation, state: &policyState, configuration: configuration) {
+            case .succeed:
+                // Logged at info so the warm-up attempt cost can be read
+                // straight off a field log: grep "Move landed" and compare
+                // the attempt counts.
+                MenuBarItemManager.diagLog.info(
+                    "Move landed: \(item.logString) after \(n) attempt(s)\(attemptStrategy.map { " via \($0)" } ?? "")"
+                )
+                MenuBarItemManager.diagLog.debug("Attempt \(n) succeeded and verified, finished with move")
+                recordLanding(of: item)
+                // Validate that item didn't get stuck when moving to hidden section
+                await validateItemPositionAfterMove(item: item, destination: destination, on: resolvedDisplayID)
+                return
+            case .retry:
+                if case .failed = observation {
+                    MenuBarItemManager.diagLog.debug(
+                        "Attempt \(n) failed: \(lastError.map { "\($0)" } ?? "unknown error")"
                     )
-                    throw error
+                } else {
+                    MenuBarItemManager.diagLog.debug("Attempt \(n) events succeeded but item not at destination, retrying")
                 }
-                // Also definitive for the duration of this call: a hung owner
-                // will not start pumping its event loop within the few hundred
-                // milliseconds between attempts, so the remaining attempts
-                // would only re-pay the semaphore wait. Callers retry the item
-                // on a later cache tick, by which point it may have recovered.
-                if case EventError.ownerUnresponsive = error {
-                    MenuBarItemManager.diagLog.warning(
-                        "Attempt \(n): \(item.logString) owner is unresponsive, aborting move"
-                    )
-                    failureLedger.recordFailure(for: item, kind: .unresponsiveOwner)
-                    throw error
+                guard shouldProceed?() ?? true else {
+                    throw EventError.moveSuperseded(item)
                 }
-                // Raised by the stale-plan check above, which has already
-                // logged. Retrying is precisely what it exists to prevent, and
-                // the item's owner did nothing wrong, so no failure is filed
-                // against it.
-                if case EventError.staleDestination = error {
-                    throw error
-                }
-                // Raised by the revert check above, which has already logged.
-                // The owner answered every press, so no failure is filed
-                // against it either.
-                if case EventError.dropReverted = error {
-                    throw error
-                }
-                if case EventError.moveSuperseded = error {
-                    throw error
-                }
-                if case EventError.inputPauseTimedOut = error {
-                    throw error
-                }
-                // An owner with a standing record of ignoring synthetic events
-                // gets no further attempts once it fails this way again. This
-                // is deliberately narrower than capping maxAttempts up front:
-                // the loop also retries when the owner *did* respond but the
-                // item did not land, which is a different failure and still
-                // deserves its full budget. Capping up front would strip those
-                // retries too, and since the move would then fail, the item
-                // could never earn the success that clears its record.
-                if let error = error as? EventError,
-                   error.indicatesUnresponsiveOwner,
-                   failureLedger.isUnresponsive(item)
-                {
-                    MenuBarItemManager.diagLog.warning(
-                        "Attempt \(n): \(item.logString) failed the way it always does, aborting move"
-                    )
-                    failureLedger.recordFailure(for: item, kind: .unresponsiveOwner)
-                    throw error
-                }
-                MenuBarItemManager.diagLog.debug("Attempt \(n) failed: \(error)")
-                if n < maxAttempts {
-                    try await waitForMoveOperationBuffer()
-                    continue
-                }
-                if let error = error as? EventError {
-                    if error.indicatesUnresponsiveOwner {
-                        failureLedger.recordFailure(for: item, kind: .unresponsiveOwner)
-                    }
-                    throw error
-                }
-                MenuBarItemManager.diagLog.warning("move: final attempt for \(item.logString) failed with non-EventError: \(error)")
-                throw EventError.cannotComplete
+                try await waitForMoveOperationBuffer()
+            case let .stop(reason):
+                stopReason = reason
+                logStop(
+                    reason,
+                    attempt: n,
+                    item: item,
+                    destination: destination,
+                    state: policyState,
+                    maxAttempts: configuration.maxAttempts,
+                    error: lastError
+                )
             }
         }
 
-        // All attempts exhausted without confirmed position. Run the stuck-item
-        // validator first (recovers x=-1 blocks), then throw so callers know
-        // the item did not reach the destination.
-        await validateItemPositionAfterMove(item: item, destination: destination, on: resolvedDisplayID)
-        MenuBarItemManager.diagLog.error("move: all \(maxAttempts) attempt(s) exhausted without verifying \(item.logString) reached \(destination.logString)")
-        throw EventError.cannotComplete
+        try await concludeFailedMove(
+            reason: stopReason ?? .other,
+            item: item,
+            destination: destination,
+            on: resolvedDisplayID,
+            attempts: policyState.attempts,
+            startedAt: startedAt,
+            lastError: lastError
+        )
     }
 }

@@ -115,18 +115,33 @@ nonisolated struct MoveFailureDiagnosticReport {
 
     // MARK: Presentation
 
-    /// Runs `alert` with an added "Save Diagnostic Report…" button and saves
-    /// this report when it is chosen.
+    /// Presents `alert` with an added "Save Diagnostic Report…" button and
+    /// saves this report when it is chosen.
+    ///
+    /// Shown as a sheet on `window` when there is one. An app-modal alert
+    /// holds the main actor for as long as it is up, and the move engine
+    /// runs on the main actor: in the field a trigger's move sat behind a
+    /// modal failure alert for fifteen seconds with its synthetic press
+    /// still down, and Control Center completed that orphaned drag by
+    /// removing the item from the bar. A sheet returns immediately.
     @MainActor
-    func run(_ alert: NSAlert) {
+    func run(_ alert: NSAlert, in window: NSWindow? = nil) {
         let notice = String(
             localized: "A diagnostic report describing this failure is available. Personal information is removed from it, so it can be attached to a bug report."
         )
         alert.informativeText = alert.informativeText.isEmpty ? notice : alert.informativeText + "\n\n" + notice
         alert.addButton(withTitle: String(localized: "OK"))
         alert.addButton(withTitle: String(localized: "Save Diagnostic Report…"))
-        if alert.runModal() == .alertSecondButtonReturn {
-            save()
+        guard let window else {
+            if alert.runModal() == .alertSecondButtonReturn {
+                save()
+            }
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertSecondButtonReturn {
+                save()
+            }
         }
     }
 
