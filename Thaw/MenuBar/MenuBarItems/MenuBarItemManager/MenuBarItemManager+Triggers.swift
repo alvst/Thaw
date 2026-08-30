@@ -465,6 +465,13 @@ extension MenuBarItemManager {
             MenuBarItemManager.diagLog.error(
                 "moveItem(trigger): failed to move to \(resolvedSection.logString) via \(destination.logString): \(target.logString); error=\(error)"
             )
+            await reportAutomaticMoveFailure(
+                of: target,
+                to: destination,
+                expectedSection: resolvedSection,
+                error: error,
+                source: "a trigger"
+            )
             return .failed
         }
     }

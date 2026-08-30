@@ -6,6 +6,7 @@
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
+import AppKit
 import UserNotifications
 
 /// Manager for user notifications.
@@ -38,10 +39,16 @@ final class UserNotificationManager: NSObject {
     }
 
     /// Schedules the delivery of a local notification.
-    func addRequest(with identifier: UserNotificationIdentifier, title: String, body: String) {
+    func addRequest(
+        with identifier: UserNotificationIdentifier,
+        title: String,
+        body: String,
+        userInfo: [AnyHashable: Any] = [:]
+    ) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        content.userInfo = userInfo
 
         let request = UNNotificationRequest(
             identifier: identifier.rawValue,
@@ -87,6 +94,16 @@ extension UserNotificationManager: @MainActor UNUserNotificationCenterDelegate {
             // Tapping a trigger notification opens Settings to the Triggers pane.
             appState.navigationState.settingsNavigationIdentifier = .triggers
             appState.openWindow(.settings)
+        case .moveFailed:
+            guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else {
+                break
+            }
+            // Opening the notification reveals the report it announced.
+            if let path = response.notification.request.content.userInfo["reportPath"] as? String {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            } else {
+                appState.openWindow(.settings)
+            }
         case nil:
             break
         }

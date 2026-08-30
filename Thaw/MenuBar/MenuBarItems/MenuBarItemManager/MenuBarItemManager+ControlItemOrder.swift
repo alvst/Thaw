@@ -133,6 +133,13 @@ extension MenuBarItemManager {
                 )
             } catch {
                 MenuBarItemManager.diagLog.error("Failed to relocate system item \(systemItem.logString): \(error)")
+                await reportAutomaticMoveFailure(
+                    of: systemItem,
+                    to: .rightOfItem(controlItems.hidden),
+                    expectedSection: .visible,
+                    error: error,
+                    source: "the section layout"
+                )
                 return false
             }
             return true
@@ -164,6 +171,13 @@ extension MenuBarItemManager {
                 )
             } catch {
                 MenuBarItemManager.diagLog.error("Failed to relocate \(candidate.logString): \(error)")
+                await reportAutomaticMoveFailure(
+                    of: candidate,
+                    to: destination,
+                    expectedSection: nil,
+                    error: error,
+                    source: "new-item placement"
+                )
                 return false
             }
             return true
@@ -217,6 +231,13 @@ extension MenuBarItemManager {
             )
         } catch {
             MenuBarItemManager.diagLog.error("Failed to relocate Thaw icon \(thawIcon.logString): \(error)")
+            await reportAutomaticMoveFailure(
+                of: thawIcon,
+                to: .rightOfItem(controlItems.hidden),
+                expectedSection: .visible,
+                error: error,
+                source: "the section layout"
+            )
             return false
         }
         return true

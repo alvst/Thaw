@@ -1402,6 +1402,19 @@ extension MenuBarItemManager {
         /// only backs the item off; anything else is unenacted and filed
         /// against the owner only when the engine says the owner was silent.
         func bookFailedMove(_ error: any Error, item: MenuBarItem, uid: String) {
+            // Off the apply's own path: the report enumerates the bar and
+            // may show a sheet, neither of which belongs inside a bulk pass.
+            // The reporter's spacing turns several losses in one pass into
+            // one report.
+            Task { [weak self] in
+                await self?.reportAutomaticMoveFailure(
+                    of: item,
+                    to: nil,
+                    expectedSection: nil,
+                    error: error,
+                    source: "the saved layout"
+                )
+            }
             if case EventError.dropReverted = error {
                 refusedMoveCount += 1
                 failureLedger.recordFailure(for: item, kind: .other)

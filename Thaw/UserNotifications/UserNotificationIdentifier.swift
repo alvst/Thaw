@@ -10,4 +10,7 @@
 enum UserNotificationIdentifier: String {
     case updateCheck = "UpdateCheck"
     case triggerFired = "TriggerFired"
+    /// An automatic move (a trigger, the saved layout, a relocation) failed
+    /// for good; opening the notification reveals the saved diagnostic report.
+    case moveFailed = "MoveFailed"
 }

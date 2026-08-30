@@ -1,6 +1,9 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ — requested by %@." : {
+
+    },
     "(no script selected)" : {
       "comment" : "A placeholder displayed in the \"Path\" column of a hook row when no script is selected.",
       "localizations" : {
@@ -3406,6 +3409,9 @@
       }
     },
     "A diagnostic report describing this failure is available. Personal information is removed from it, so it can be attached to a bug report." : {
+
+    },
+    "A diagnostic report was saved to %@." : {
 
     },
     "A new update is available" : {
@@ -16457,6 +16463,9 @@
           }
         }
       }
+    },
+    "Couldn't move %@" : {
+
     },
     "Couldn't move %@ to the always-hidden section." : {
       "localizations" : {

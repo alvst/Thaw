@@ -24,11 +24,11 @@ nonisolated struct MoveFailureDiagnosticReport {
         /// The item that did not move.
         let item: MenuBarItem
 
-        /// Where it was supposed to go.
-        let destination: MenuBarItemManager.MoveDestination
+        /// Where it was supposed to go, when the caller still knows.
+        let destination: MenuBarItemManager.MoveDestination?
 
-        /// The section the destination lies in.
-        let expectedSection: MenuBarSection.Name
+        /// The section the destination lies in, when the caller knows.
+        let expectedSection: MenuBarSection.Name?
 
         /// The error the move ended with.
         let error: any Error
@@ -38,8 +38,8 @@ nonisolated struct MoveFailureDiagnosticReport {
 
         init(
             item: MenuBarItem,
-            destination: MenuBarItemManager.MoveDestination,
-            expectedSection: MenuBarSection.Name,
+            destination: MenuBarItemManager.MoveDestination?,
+            expectedSection: MenuBarSection.Name?,
             error: any Error,
             note: String? = nil
         ) {
@@ -142,6 +142,47 @@ nonisolated struct MoveFailureDiagnosticReport {
             if response == .alertSecondButtonReturn {
                 save()
             }
+        }
+    }
+
+    /// Where reports for failed automatic moves are written without asking:
+    /// `~/Library/Logs/Thaw/Diagnostics`.
+    static var automaticReportsDirectory: URL {
+        DiagnosticLogger.shared.logDirectory.appendingPathComponent("Diagnostics", isDirectory: true)
+    }
+
+    /// How many automatic reports are kept; the oldest are removed.
+    static let automaticReportsKept = 20
+
+    /// Writes the report into ``automaticReportsDirectory`` and prunes the
+    /// folder to the newest ``automaticReportsKept`` reports.
+    @discardableResult
+    func writeToAutomaticReports() throws -> URL {
+        let directory = Self.automaticReportsDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(suggestedFileName)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        Self.pruneAutomaticReports(in: directory, keeping: Self.automaticReportsKept)
+        return url
+    }
+
+    /// Removes all but the newest `keepCount` reports in `directory`.
+    static func pruneAutomaticReports(in directory: URL, keeping keepCount: Int) {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: .skipsHiddenFiles
+        ) else {
+            return
+        }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+        }
+        let reports = urls
+            .filter { $0.pathExtension == "txt" }
+            .sorted { modified($0) > modified($1) }
+        for stale in reports.dropFirst(keepCount) {
+            try? FileManager.default.removeItem(at: stale)
         }
     }
 
@@ -248,18 +289,22 @@ private extension MoveFailureDiagnosticReport {
         if let note = failure.note {
             writer.line("Note: \(note)")
         }
-        writer.line("Expected section: \(failure.expectedSection.logString)")
+        writer.line("Expected section: \(failure.expectedSection?.logString ?? "unknown")")
         writer.line("Item: \(failure.item.logString)")
         for line in itemLines(failure.item, cache: cache, manager: manager) {
             writer.line(line)
         }
-        let target = failure.destination.targetItem
-        writer.line("Destination: \(failure.destination.logString)")
-        for line in itemLines(target, cache: cache, manager: manager) {
-            writer.line(line)
-        }
-        if let liveTargetBounds = Bridging.getWindowBounds(for: target.windowID) {
-            writer.line("  liveBounds=\(format(liveTargetBounds))")
+        if let destination = failure.destination {
+            let target = destination.targetItem
+            writer.line("Destination: \(destination.logString)")
+            for line in itemLines(target, cache: cache, manager: manager) {
+                writer.line(line)
+            }
+            if let liveTargetBounds = Bridging.getWindowBounds(for: target.windowID) {
+                writer.line("  liveBounds=\(format(liveTargetBounds))")
+            }
+        } else {
+            writer.line("Destination: not recorded by the caller (see the log excerpt)")
         }
 
         let lastMove = manager.lastMoveOperationTimestamp.map { instant in
