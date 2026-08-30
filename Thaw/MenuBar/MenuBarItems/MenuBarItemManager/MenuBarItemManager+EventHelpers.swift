@@ -159,7 +159,16 @@ extension MenuBarItemManager {
             case .itemNotMovable:
                 nil
             case let .dropReverted(item):
-                "macOS put \"\(item.displayName)\" back after every attempt. This usually clears on its own within a few minutes; clicking the item, or quitting and reopening its app, resets it sooner. If it keeps happening, please file a bug report."
+                // An app with no bundle identifier — a bare executable such
+                // as a `swift run` build — is keyed by path in Control
+                // Center, which has refused every off-screen drop of such an
+                // item in the field. Say so, or the alert reads as a Thaw
+                // bug the next time around.
+                if let app = item.sourceApplication, app.bundleIdentifier == nil {
+                    "macOS put \"\(item.displayName)\" back after every attempt. Its app has no bundle identifier (it runs as a bare executable), and macOS does not keep such items in a hidden section. Build it as an app bundle to test moving it."
+                } else {
+                    "macOS put \"\(item.displayName)\" back after every attempt. This usually clears on its own within a few minutes; clicking the item, or quitting and reopening its app, resets it sooner. If it keeps happening, please file a bug report."
+                }
             case .moveEngineBusy:
                 "Wait a moment for the move in progress to finish, then try again."
             default:
