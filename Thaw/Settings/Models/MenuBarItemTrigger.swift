@@ -191,6 +191,7 @@ enum TriggerCondition: Codable, Hashable {
     case bluetoothConnected(name: String)
     case audioOutput(contains: String)
     case externalDisplayConnected
+    case externalDriveConnected
 
     // Time / Focus
     case schedule(startMinutes: Int, endMinutes: Int)
@@ -260,6 +261,8 @@ enum TriggerCondition: Codable, Hashable {
             return !substring.isEmpty && (state.audioOutputDeviceName?.localizedCaseInsensitiveContains(substring) ?? false)
         case .externalDisplayConnected:
             return state.externalDisplayConnected
+        case .externalDriveConnected:
+            return state.externalDriveConnected
         case let .schedule(start, end):
             return Self.isWithinSchedule(now: now, startMinutes: start, endMinutes: end)
         case let .weeklySchedule(start, end, weekdays):
@@ -340,6 +343,8 @@ enum TriggerCondition: Codable, Hashable {
             return substring.isEmpty ? "Audio output device" : "Audio output is “\(substring)”"
         case .externalDisplayConnected:
             return "External display is connected"
+        case .externalDriveConnected:
+            return "External drive is connected"
         case let .schedule(start, end):
             return "Between \(Self.clockString(start)) and \(Self.clockString(end))"
         case let .weeklySchedule(start, end, weekdays):
@@ -454,6 +459,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
     case bluetoothConnected
     case audioOutput
     case externalDisplay
+    case externalDrive
     case schedule
     case focusActive
     case focusModeNamed
@@ -485,6 +491,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .bluetoothConnected: "Bluetooth device is connected"
         case .audioOutput: "Audio output device"
         case .externalDisplay: "External display is connected"
+        case .externalDrive: "External drive is connected"
         case .schedule: "During time window"
         case .focusActive: "Any Focus is active"
         case .focusModeNamed: "Focus Filter profile is"
@@ -534,7 +541,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .scriptResult: .script
         case .imageChanged: .imageComparison
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive,
+             .vpnActive, .externalDisplay, .externalDrive, .focusActive,
              .cameraInUse, .microphoneInUse:
             .none
         }
@@ -554,6 +561,7 @@ enum TriggerConditionKind: String, CaseIterable, Identifiable {
         case .bluetoothConnected: .bluetooth
         case .audioOutput: .audioOutput
         case .externalDisplay: .display
+        case .externalDrive: .externalDrive
         case .schedule: .schedule
         case .focusActive: .focusMode
         case .focusModeNamed: .focusMode
@@ -602,6 +610,7 @@ extension TriggerCondition {
         case .bluetoothConnected: .bluetoothConnected
         case .audioOutput: .audioOutput
         case .externalDisplayConnected: .externalDisplay
+        case .externalDriveConnected: .externalDrive
         case .schedule, .weeklySchedule: .schedule
         case .focusActive: .focusActive
         case .focusMode: .focusModeNamed
@@ -727,6 +736,7 @@ extension TriggerCondition {
         case .bluetoothConnected: .bluetoothConnected(name: "")
         case .audioOutput: .audioOutput(contains: "")
         case .externalDisplay: .externalDisplayConnected
+        case .externalDrive: .externalDriveConnected
         case .schedule: .weeklySchedule(startMinutes: 9 * 60, endMinutes: 17 * 60, weekdays: ScheduleWeekday.everyDay)
         case .focusActive: .focusActive
         case .focusModeNamed: .focusMode(name: "")
@@ -779,7 +789,7 @@ extension TriggerCondition {
             }
                 ?? .imageChanged(itemIdentifier: "", referenceHash: nil)
         case .onACPower, .onBatteryPower, .charging, .networkConnected,
-             .vpnActive, .externalDisplay, .focusActive, .nearLocation,
+             .vpnActive, .externalDisplay, .externalDrive, .focusActive, .nearLocation,
              .cameraInUse, .microphoneInUse:
             defaultCondition(for: kind)
         }

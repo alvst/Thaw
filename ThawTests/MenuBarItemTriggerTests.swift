@@ -156,6 +156,19 @@ final class MenuBarItemTriggerTests: XCTestCase {
         XCTAssertFalse(TriggerCondition.externalDisplayConnected.isSatisfied(state: state(externalDisplay: false)))
     }
 
+    func testExternalDrive() {
+        XCTAssertTrue(
+            TriggerCondition.externalDriveConnected.isSatisfied(
+                state: SystemState(externalDriveConnected: true)
+            )
+        )
+        XCTAssertFalse(
+            TriggerCondition.externalDriveConnected.isSatisfied(
+                state: SystemState(externalDriveConnected: false)
+            )
+        )
+    }
+
     func testFocusActive() {
         XCTAssertTrue(TriggerCondition.focusActive.isSatisfied(state: state(focus: true)))
         XCTAssertFalse(TriggerCondition.focusActive.isSatisfied(state: state(focus: false)))

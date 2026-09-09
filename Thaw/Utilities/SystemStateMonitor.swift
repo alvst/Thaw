@@ -65,6 +65,9 @@ struct SystemState: Equatable {
     /// Whether at least one external (non-built-in) display is connected.
     var externalDisplayConnected: Bool
 
+    /// Whether at least one external volume is currently mounted.
+    var externalDriveConnected: Bool
+
     /// Whether a macOS Focus / Do Not Disturb appears to be active
     /// (best-effort).
     var isFocusActive: Bool
@@ -122,6 +125,7 @@ struct SystemState: Equatable {
         audioOutputDeviceName: String? = nil,
         screenCount: Int = 1,
         externalDisplayConnected: Bool = false,
+        externalDriveConnected: Bool = false,
         isFocusActive: Bool = false,
         activeFocusModeName: String? = nil,
         currentLatitude: Double? = nil,
@@ -144,6 +148,7 @@ struct SystemState: Equatable {
         self.audioOutputDeviceName = audioOutputDeviceName
         self.screenCount = screenCount
         self.externalDisplayConnected = externalDisplayConnected
+        self.externalDriveConnected = externalDriveConnected
         self.isFocusActive = isFocusActive
         self.activeFocusModeName = activeFocusModeName
         self.currentLatitude = currentLatitude
@@ -182,6 +187,7 @@ final class SystemStateMonitor: ObservableObject {
 
     // Event-driven source handles.
     private var workspaceObservers = [NSObjectProtocol]()
+    private var volumeObservers = [NSObjectProtocol]()
     private var screenObserver: NSObjectProtocol?
     private var systemLoadObservers = [NSObjectProtocol]()
 
@@ -235,6 +241,7 @@ final class SystemStateMonitor: ObservableObject {
             $0.power = self.powerMonitor.state
             $0.screenCount = NSScreen.screens.count
             $0.externalDisplayConnected = Self.hasExternalDisplay()
+            $0.externalDriveConnected = Self.hasExternalDrive()
         }
 
         reconfigure()
@@ -247,6 +254,7 @@ final class SystemStateMonitor: ObservableObject {
         setFrontmostAppMonitoring(flags.isEnabled(.frontmostApp) || flags.isEnabled(.appRunning))
         setAppRefreshPolling(flags.isEnabled(.appRunning))
         setDisplayMonitoring(flags.isEnabled(.display))
+        setExternalDriveMonitoring(flags.isEnabled(.externalDrive))
         setNetworkMonitoring(flags.isEnabled(.network) || flags.isEnabled(.vpn))
         setSystemLoadMonitoring(flags.isEnabled(.energyMode) || flags.isEnabled(.thermalPressure))
 
@@ -388,6 +396,61 @@ final class SystemStateMonitor: ObservableObject {
             }
         }
         return false
+    }
+
+    // MARK: External drives
+
+    private func setExternalDriveMonitoring(_ enabled: Bool) {
+        let isMonitoring = !volumeObservers.isEmpty
+        guard enabled != isMonitoring else {
+            if enabled { refreshExternalDriveState() }
+            return
+        }
+
+        if enabled {
+            let center = NSWorkspace.shared.notificationCenter
+            for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+                let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refreshExternalDriveState() }
+                }
+                volumeObservers.append(token)
+            }
+            refreshExternalDriveState()
+        } else {
+            for token in volumeObservers {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            volumeObservers.removeAll()
+        }
+    }
+
+    private func refreshExternalDriveState() {
+        let connected = Self.hasExternalDrive()
+        update { $0.externalDriveConnected = connected }
+        diagLog.debug("External drive state refreshed: connected=\(connected)")
+    }
+
+    private static func hasExternalDrive() -> Bool {
+        let keys: Set<URLResourceKey> = [
+            .volumeIsInternalKey,
+            .volumeIsRemovableKey,
+            .volumeIsEjectableKey,
+        ]
+        guard let volumes = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: Array(keys),
+            options: [.skipHiddenVolumes]
+        ) else {
+            return false
+        }
+
+        return volumes.contains { volume in
+            guard let values = try? volume.resourceValues(forKeys: keys) else { return false }
+            // A non-internal mounted volume covers USB/Thunderbolt disks and
+            // filesystems supplied by drivers such as Paragon NTFS/Tuxera.
+            // The removable/ejectable flags are intentionally not required:
+            // many external SSDs do not advertise either one.
+            return values.volumeIsInternal == false
+        }
     }
 
     // MARK: Location (for Wi-Fi SSID)
@@ -604,6 +667,7 @@ final class SystemStateMonitor: ObservableObject {
             audioOutputDeviceName: defaultAudioOutputDeviceName(),
             screenCount: NSScreen.screens.count,
             externalDisplayConnected: hasExternalDisplay(),
+            externalDriveConnected: hasExternalDrive(),
             isFocusActive: isFocusActive(),
             activeFocusModeName: ThawFocusModeStore.activeMode,
             energyMode: EnergyModeMonitor.read(),
