@@ -169,6 +169,21 @@ final class MenuBarItemTriggerTests: XCTestCase {
         )
     }
 
+    func testExternalVolumeKinds() {
+        let state = SystemState(
+            mountedVolumes: [
+                MountedVolume(name: "Backup", uuid: "backup-id", isRemovable: true, isNetwork: false),
+                MountedVolume(name: "NAS", uuid: "nas-id", isRemovable: false, isNetwork: true),
+            ]
+        )
+        XCTAssertTrue(TriggerCondition.removableDriveConnected.isSatisfied(state: state))
+        XCTAssertTrue(TriggerCondition.networkVolumeConnected.isSatisfied(state: state))
+        XCTAssertTrue(TriggerCondition.externalVolumeNamed(names: ["backup"]).isSatisfied(state: state))
+        XCTAssertTrue(TriggerCondition.externalVolumeNamed(names: ["Missing", "NAS"]).isSatisfied(state: state))
+        XCTAssertTrue(TriggerCondition.externalVolumeUUID(uuid: "BACKUP-ID").isSatisfied(state: state))
+        XCTAssertFalse(TriggerCondition.externalVolumeUUID(uuid: "missing-id").isSatisfied(state: state))
+    }
+
     func testFocusActive() {
         XCTAssertTrue(TriggerCondition.focusActive.isSatisfied(state: state(focus: true)))
         XCTAssertFalse(TriggerCondition.focusActive.isSatisfied(state: state(focus: false)))

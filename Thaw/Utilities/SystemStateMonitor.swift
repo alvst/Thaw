@@ -29,6 +29,14 @@ struct ScriptOutcome: Equatable {
     var matchedExpectedOutputs: Set<String> = []
 }
 
+/// The mounted-volume facts used by external-drive trigger conditions.
+struct MountedVolume: Equatable, Hashable {
+    var name: String
+    var uuid: String
+    var isRemovable: Bool
+    var isNetwork: Bool
+}
+
 // MARK: - SystemState
 
 /// A snapshot of the system signals that menu bar item triggers evaluate
@@ -67,6 +75,9 @@ struct SystemState: Equatable {
 
     /// Whether at least one external volume is currently mounted.
     var externalDriveConnected: Bool
+
+    /// External and network volumes currently mounted on the system.
+    var mountedVolumes: Set<MountedVolume>
 
     /// Whether a macOS Focus / Do Not Disturb appears to be active
     /// (best-effort).
@@ -126,6 +137,7 @@ struct SystemState: Equatable {
         screenCount: Int = 1,
         externalDisplayConnected: Bool = false,
         externalDriveConnected: Bool = false,
+        mountedVolumes: Set<MountedVolume> = [],
         isFocusActive: Bool = false,
         activeFocusModeName: String? = nil,
         currentLatitude: Double? = nil,
@@ -149,6 +161,7 @@ struct SystemState: Equatable {
         self.screenCount = screenCount
         self.externalDisplayConnected = externalDisplayConnected
         self.externalDriveConnected = externalDriveConnected
+        self.mountedVolumes = mountedVolumes
         self.isFocusActive = isFocusActive
         self.activeFocusModeName = activeFocusModeName
         self.currentLatitude = currentLatitude
@@ -242,6 +255,7 @@ final class SystemStateMonitor: ObservableObject {
             $0.screenCount = NSScreen.screens.count
             $0.externalDisplayConnected = Self.hasExternalDisplay()
             $0.externalDriveConnected = Self.hasExternalDrive()
+            $0.mountedVolumes = Self.mountedVolumes()
         }
 
         reconfigure()
@@ -425,32 +439,47 @@ final class SystemStateMonitor: ObservableObject {
     }
 
     private func refreshExternalDriveState() {
-        let connected = Self.hasExternalDrive()
-        update { $0.externalDriveConnected = connected }
-        diagLog.debug("External drive state refreshed: connected=\(connected)")
+        let volumes = Self.mountedVolumes()
+        update {
+            $0.externalDriveConnected = volumes.contains { !$0.isNetwork }
+            $0.mountedVolumes = volumes
+        }
+        diagLog.debug("External drive state refreshed: connected=\(!volumes.filter { !$0.isNetwork }.isEmpty)")
     }
 
-    private static func hasExternalDrive() -> Bool {
+    private static func mountedVolumes() -> Set<MountedVolume> {
         let keys: Set<URLResourceKey> = [
+            .volumeNameKey,
+            .volumeUUIDStringKey,
             .volumeIsInternalKey,
             .volumeIsRemovableKey,
             .volumeIsEjectableKey,
+            .volumeIsLocalKey,
         ]
-        guard let volumes = FileManager.default.mountedVolumeURLs(
+        guard let urls = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: Array(keys),
             options: [.skipHiddenVolumes]
         ) else {
-            return false
+            return []
         }
 
-        return volumes.contains { volume in
-            guard let values = try? volume.resourceValues(forKeys: keys) else { return false }
-            // A non-internal mounted volume covers USB/Thunderbolt disks and
-            // filesystems supplied by drivers such as Paragon NTFS/Tuxera.
-            // The removable/ejectable flags are intentionally not required:
-            // many external SSDs do not advertise either one.
-            return values.volumeIsInternal == false
-        }
+        return Set(urls.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  values.volumeIsInternal == false,
+                  let name = values.volumeName,
+                  let uuid = values.volumeUUIDString
+            else { return nil }
+            return MountedVolume(
+                name: name,
+                uuid: uuid,
+                isRemovable: values.volumeIsRemovable == true || values.volumeIsEjectable == true,
+                isNetwork: values.volumeIsLocal == false
+            )
+        })
+    }
+
+    private static func hasExternalDrive() -> Bool {
+        mountedVolumes().contains { !$0.isNetwork }
     }
 
     // MARK: Location (for Wi-Fi SSID)
@@ -668,6 +697,7 @@ final class SystemStateMonitor: ObservableObject {
             screenCount: NSScreen.screens.count,
             externalDisplayConnected: hasExternalDisplay(),
             externalDriveConnected: hasExternalDrive(),
+            mountedVolumes: mountedVolumes(),
             isFocusActive: isFocusActive(),
             activeFocusModeName: ThawFocusModeStore.activeMode,
             energyMode: EnergyModeMonitor.read(),
