@@ -120,7 +120,7 @@ private extension MenuBarItemTriggerRuntimeStatus {
         case .off:
             "This trigger is turned off."
         case .inactive:
-            "A required trigger source is disabled in Developer settings."
+            "A required trigger source is disabled in Trigger Flags."
         case .settling:
             "The condition changed and is waiting for its settle delay before moving the item."
         case .moving:
@@ -1092,7 +1092,7 @@ private struct TriggerRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-            Text("This condition is turned off in Developer settings, so the trigger won't run.")
+                Text("This condition is turned off in Trigger Flags, so the trigger won't run.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1310,7 +1310,7 @@ private struct TriggerRow: View {
             )
 
             if coordinate == nil {
-                Text("Turn on the Location flag in Developer settings and grant permission to capture your current location.")
+                Text("Turn on the Location flag in Trigger Flags and grant permission to capture your current location.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -17894,7 +17894,7 @@
         }
       }
     },
-    "Dev Mode Flags" : {
+    "Trigger Flags" : {
 
     },
     "Development" : {
@@ -55137,7 +55137,7 @@
         }
       }
     },
-    "This condition is turned off in Developer settings, so the trigger won't run." : {
+    "This condition is turned off in Trigger Flags, so the trigger won't run." : {
 
     },
     "This trigger controls %@'s section. Your saved layout no longer applies to it." : {
@@ -57207,7 +57207,7 @@
     "Triggers" : {
 
     },
-    "Turn on the Location flag in Developer settings and grant permission to capture your current location." : {
+    "Turn on the Location flag in Trigger Flags and grant permission to capture your current location." : {
 
     },
     "Type Hotkey" : {

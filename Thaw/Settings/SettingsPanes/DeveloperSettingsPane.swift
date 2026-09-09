@@ -74,7 +74,7 @@ struct DeveloperSettingsPane: View {
         IceSection {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("Dev Mode Flags")
+                    Text("Trigger Flags")
                         .font(.headline)
                     Spacer()
                     Button {
